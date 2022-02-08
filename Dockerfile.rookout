@@ -1,0 +1,24 @@
+FROM golang:1.17 AS builder
+
+ARG ARTIFACTORY_CREDS
+
+RUN apt update && apt install -y libffi-dev zlib1g-dev libedit-dev libc++-11-dev libc++abi-11-dev
+
+# For later use in the scratch image
+RUN apt install ca-certificates && update-ca-certificates
+
+RUN go env -w GONOSUMDB=github.com/Rookout/GoSDK && go env -w GOPROXY="https://proxy.golang.org,https://${ARTIFACTORY_CREDS}@rookout.jfrog.io/artifactory/api/go/rookout-go,direct"
+
+COPY . /minio
+
+WORKDIR /minio
+
+RUN make build-rookout
+
+FROM scratch
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+COPY --from=builder /minio/minio /minio
+
+CMD ["/minio"]

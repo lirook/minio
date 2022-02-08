@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	rookout "github.com/Rookout/GoSDK"
 	"github.com/minio/cli"
 	"github.com/minio/pkg/console"
 	"github.com/minio/pkg/trie"
@@ -161,6 +162,9 @@ func newApp(name string) *cli.App {
 
 // Main main for minio server.
 func Main(args []string) {
+
+	rookout.Start(rookout.RookOptions{})
+
 	// Set the minio app name.
 	appName := filepath.Base(args[0])
 

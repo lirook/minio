@@ -1,6 +1,7 @@
 PWD := $(shell pwd)
 GOPATH := $(shell go env GOPATH)
 LDFLAGS := $(shell go run buildscripts/gen-ldflags.go)
+LDFLAGS_ROOKOUT := $(shell go run buildscripts/gen-ldflags-rookout.go)
 
 GOARCH := $(shell go env GOARCH)
 GOOS := $(shell go env GOOS)
@@ -81,6 +82,10 @@ verify-healing: ## verify healing and replacing disks with minio binary
 	@CGO_ENABLED=1 go build -race -tags kqueue -trimpath --ldflags "$(LDFLAGS)" -o $(PWD)/minio 1>/dev/null
 	@(env bash $(PWD)/buildscripts/verify-healing.sh)
 	@(env bash $(PWD)/buildscripts/unaligned-healing.sh)
+
+build-rookout: checks ## builds minio to $(PWD)
+	@echo "Building minio binary to './minio'"
+	@CGO_ENABLED=1 go build -tags "kqueue,alpine314,rookout_static" -trimpath --ldflags "$(LDFLAGS-ROOKOUT)" -gcflags '-N -l' -o $(PWD)/minio 1>/dev/null
 
 build: checks ## builds minio to $(PWD)
 	@echo "Building minio binary to './minio'"
