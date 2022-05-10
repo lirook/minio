@@ -91,6 +91,9 @@ const (
 	AmzBucketReplicationStatus    = "X-Amz-Replication-Status"
 	AmzSnowballExtract            = "X-Amz-Meta-Snowball-Auto-Extract"
 
+	// Object lock enabled
+	AmzObjectLockEnabled = "x-amz-bucket-object-lock-enabled"
+
 	// Multipart parts count
 	AmzMpPartsCount = "x-amz-mp-parts-count"
 
@@ -144,6 +147,9 @@ const (
 	// Delete special flag to force delete a bucket or a prefix
 	MinIOForceDelete = "x-minio-force-delete"
 
+	// Create special flag to force create a bucket
+	MinIOForceCreate = "x-minio-force-create"
+
 	// Header indicates if the mtime should be preserved by client
 	MinIOSourceMTime = "x-minio-source-mtime"
 
@@ -190,4 +196,10 @@ const (
 	PartNumber = "partNumber"
 
 	UploadID = "uploadId"
+)
+
+// http headers sent to webhook targets
+const (
+	// Reports the version of MinIO server
+	MinIOVersion = "x-minio-version"
 )

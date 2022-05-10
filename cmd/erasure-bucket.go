@@ -39,8 +39,10 @@ func (er erasureObjects) MakeBucketWithLocation(ctx context.Context, bucket stri
 	defer NSUpdated(bucket, slashSeparator)
 
 	// Verify if bucket is valid.
-	if err := s3utils.CheckValidBucketNameStrict(bucket); err != nil {
-		return BucketNameInvalid{Bucket: bucket}
+	if !isMinioMetaBucketName(bucket) {
+		if err := s3utils.CheckValidBucketNameStrict(bucket); err != nil {
+			return BucketNameInvalid{Bucket: bucket}
+		}
 	}
 
 	storageDisks := er.getDisks()
@@ -53,6 +55,11 @@ func (er erasureObjects) MakeBucketWithLocation(ctx context.Context, bucket stri
 		g.Go(func() error {
 			if storageDisks[index] != nil {
 				if err := storageDisks[index].MakeVol(ctx, bucket); err != nil {
+					if opts.ForceCreate && errors.Is(err, errVolumeExists) {
+						// No need to return error when force create was
+						// requested.
+						return nil
+					}
 					if !errors.Is(err, errVolumeExists) {
 						logger.LogIf(ctx, err)
 					}

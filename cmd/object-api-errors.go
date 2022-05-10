@@ -31,6 +31,9 @@ func toObjectErr(err error, params ...string) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
 	switch err.Error() {
 	case errVolumeNotFound.Error():
 		apiErr := BucketNotFound{}
@@ -697,4 +700,9 @@ func isErrPreconditionFailed(err error) bool {
 func isErrMethodNotAllowed(err error) bool {
 	var methodNotAllowed MethodNotAllowed
 	return errors.As(err, &methodNotAllowed)
+}
+
+func isErrInvalidRange(err error) bool {
+	_, ok := err.(InvalidRange)
+	return ok
 }

@@ -20,12 +20,15 @@ package cmd
 import (
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/minio/kes"
 	"github.com/minio/madmin-go"
+	"github.com/minio/minio/internal/kms"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/pkg/bucket/policy"
 )
@@ -83,6 +86,19 @@ func (api objectAPIHandlers) PutBucketEncryptionHandler(w http.ResponseWriter, r
 	if GlobalKMS == nil {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrKMSNotConfigured), r.URL)
 		return
+	}
+	kmsKey := encConfig.KeyID()
+	if kmsKey != "" {
+		kmsContext := kms.Context{"MinIO admin API": "ServerInfoHandler"} // Context for a test key operation
+		_, err := GlobalKMS.GenerateKey(kmsKey, kmsContext)
+		if err != nil {
+			if errors.Is(err, kes.ErrKeyNotFound) {
+				writeErrorResponse(ctx, w, toAPIError(ctx, errKMSKeyNotFound), r.URL)
+				return
+			}
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
 	}
 
 	configData, err := xml.Marshal(encConfig)
@@ -142,7 +158,7 @@ func (api objectAPIHandlers) GetBucketEncryptionHandler(w http.ResponseWriter, r
 		return
 	}
 
-	config, err := globalBucketMetadataSys.GetSSEConfig(bucket)
+	config, _, err := globalBucketMetadataSys.GetSSEConfig(bucket)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
@@ -190,6 +206,15 @@ func (api objectAPIHandlers) DeleteBucketEncryptionHandler(w http.ResponseWriter
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
-
+	// Call site replication hook.
+	//
+	if err = globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
+		Type:      madmin.SRBucketMetaTypeSSEConfig,
+		Bucket:    bucket,
+		SSEConfig: nil,
+	}); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		return
+	}
 	writeSuccessNoContent(w)
 }

@@ -71,6 +71,11 @@ func (a adminAPIHandlers) PutBucketQuotaConfigHandler(w http.ResponseWriter, r *
 		return
 	}
 
+	if quotaConfig.Type == "fifo" {
+		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrInvalidRequest), r.URL)
+		return
+	}
+
 	if err = globalBucketMetadataSys.Update(ctx, bucket, bucketQuotaConfigFile, data); err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
@@ -115,7 +120,7 @@ func (a adminAPIHandlers) GetBucketQuotaConfigHandler(w http.ResponseWriter, r *
 		return
 	}
 
-	config, err := globalBucketMetadataSys.GetQuotaConfig(ctx, bucket)
+	config, _, err := globalBucketMetadataSys.GetQuotaConfig(ctx, bucket)
 	if err != nil {
 		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
 		return

@@ -191,7 +191,7 @@ func healingMetricsPrometheus(ch chan<- prometheus.Metric) {
 // collects gateway specific metrics for MinIO instance in Prometheus specific format
 // and sends to given channel
 func gatewayMetricsPrometheus(ch chan<- prometheus.Metric) {
-	if !globalIsGateway || (globalGatewayName != S3BackendGateway && globalGatewayName != AzureBackendGateway && globalGatewayName != GCSBackendGateway) {
+	if !globalIsGateway || (globalGatewayName != S3BackendGateway) {
 		return
 	}
 
@@ -674,7 +674,7 @@ func metricsHandler() http.Handler {
 // AuthMiddleware checks if the bearer token is valid and authorized.
 func AuthMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		claims, groups, owner, authErr := webRequestAuthenticate(r)
+		claims, groups, owner, authErr := metricsRequestAuthenticate(r)
 		if authErr != nil || !claims.VerifyIssuer("prometheus", true) {
 			w.WriteHeader(http.StatusForbidden)
 			return

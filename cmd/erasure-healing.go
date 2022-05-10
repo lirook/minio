@@ -60,7 +60,8 @@ func (fi FileInfo) DataShardFixed() bool {
 // also heals the missing entries for bucket metadata files
 // `policy.json, notification.xml, listeners.json`.
 func (er erasureObjects) HealBucket(ctx context.Context, bucket string, opts madmin.HealOpts) (
-	result madmin.HealResultItem, err error) {
+	result madmin.HealResultItem, err error,
+) {
 	if !opts.DryRun {
 		defer NSUpdated(bucket, slashSeparator)
 	}
@@ -808,52 +809,20 @@ func (er erasureObjects) purgeObjectDangling(ctx context.Context, bucket, object
 ) {
 	storageDisks := er.getDisks()
 	storageEndpoints := er.getEndpoints()
-	// Check if the object is dangling, if yes and user requested
-	// remove we simply delete it from namespace.
-	m, ok := isObjectDangling(metaArr, errs, dataErrs)
-	if ok {
-		parityBlocks := er.defaultParityCount
-		dataBlocks := len(storageDisks) - parityBlocks
-		if m.IsValid() {
-			parityBlocks = m.Erasure.ParityBlocks
-			dataBlocks = m.Erasure.DataBlocks
-		}
 
-		writeQuorum := dataBlocks
-		if dataBlocks == parityBlocks {
-			writeQuorum++
-		}
-
-		var err error
-		if opts.Remove {
-			err = er.deleteObjectVersion(ctx, bucket, object, writeQuorum, FileInfo{
-				VersionID: versionID,
-			}, false)
-
-			// If Delete was successful, make sure to return the appropriate error
-			// and heal result appropriate with delete's error messages
-			errs = make([]error, len(errs))
-			for i := range errs {
-				errs[i] = err
-			}
-			if err == nil {
-				// Dangling object successfully purged, size is '0'
-				m.Size = 0
-			}
-
-			return er.defaultHealResult(FileInfo{}, storageDisks, storageEndpoints,
-				errs, bucket, object, versionID), nil
-		}
-
-		return er.defaultHealResult(m, storageDisks, storageEndpoints,
-			errs, bucket, object, versionID), toObjectErr(err, bucket, object, versionID)
+	m, err := er.deleteIfDangling(ctx, bucket, object, metaArr, errs, dataErrs, ObjectOptions{
+		VersionID: versionID,
+	})
+	errs = make([]error, len(errs))
+	for i := range errs {
+		errs[i] = err
 	}
-
-	readQuorum := len(storageDisks) - er.defaultParityCount
-
-	err := toObjectErr(reduceReadQuorumErrs(ctx, errs, objectOpIgnoredErrs, readQuorum),
-		bucket, object, versionID)
-	return er.defaultHealResult(m, storageDisks, storageEndpoints, errs, bucket, object, versionID), err
+	if err == nil {
+		// Dangling object successfully purged, size is '0'
+		m.Size = 0
+	}
+	return er.defaultHealResult(m, storageDisks, storageEndpoints,
+		errs, bucket, object, versionID), nil
 }
 
 // Object is considered dangling/corrupted if any only
@@ -963,5 +932,12 @@ func (er erasureObjects) HealObject(ctx context.Context, bucket, object, version
 	}
 
 	// Heal the object.
-	return er.healObject(healCtx, bucket, object, versionID, opts)
+	hr, err = er.healObject(healCtx, bucket, object, versionID, opts)
+	if errors.Is(err, errFileCorrupt) && opts.ScanMode != madmin.HealDeepScan {
+		// Instead of returning an error when a bitrot error is detected
+		// during a normal heal scan, heal again with bitrot flag enabled.
+		opts.ScanMode = madmin.HealDeepScan
+		hr, err = er.healObject(healCtx, bucket, object, versionID, opts)
+	}
+	return hr, err
 }

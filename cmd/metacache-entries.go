@@ -191,6 +191,16 @@ func (e *metaCacheEntry) fileInfo(bucket string) (FileInfo, error) {
 		}, nil
 	}
 	if e.cached != nil {
+		if len(e.cached.versions) == 0 {
+			// This special case is needed to handle xlMeta.versions == 0
+			return FileInfo{
+				Volume:   bucket,
+				Name:     e.name,
+				Deleted:  true,
+				IsLatest: true,
+				ModTime:  timeSentinel1970,
+			}, nil
+		}
 		return e.cached.ToFileInfo(bucket, e.name, "")
 	}
 	return getFileInfo(e.metadata, bucket, e.name, "", false)
@@ -271,10 +281,16 @@ func (m metaCacheEntries) shallowClone() metaCacheEntries {
 }
 
 type metadataResolutionParams struct {
-	dirQuorum int    // Number if disks needed for a directory to 'exist'.
-	objQuorum int    // Number of disks needed for an object to 'exist'.
-	bucket    string // Name of the bucket. Used for generating cached fileinfo.
-	strict    bool   // Versions must match exactly, including all metadata.
+	dirQuorum int // Number if disks needed for a directory to 'exist'.
+	objQuorum int // Number of disks needed for an object to 'exist'.
+
+	// An optimization request only an 'n' amount of versions from xl.meta
+	// to avoid resolving all versions to figure out the latest 'version'
+	// for ListObjects, ListObjectsV2
+	requestedVersions int
+
+	bucket string // Name of the bucket. Used for generating cached fileinfo.
+	strict bool   // Versions must match exactly, including all metadata.
 
 	// Reusable slice for resolution
 	candidates [][]xlMetaV2ShallowVersion
@@ -362,7 +378,7 @@ func (m metaCacheEntries) resolve(r *metadataResolutionParams) (selected *metaCa
 		reusable: true,
 		cached:   &xlMetaV2{metaV: selected.cached.metaV},
 	}
-	selected.cached.versions = mergeXLV2Versions(r.objQuorum, r.strict, r.candidates...)
+	selected.cached.versions = mergeXLV2Versions(r.objQuorum, r.strict, r.requestedVersions, r.candidates...)
 	if len(selected.cached.versions) == 0 {
 		return nil, false
 	}
@@ -379,11 +395,11 @@ func (m metaCacheEntries) resolve(r *metadataResolutionParams) (selected *metaCa
 
 // firstFound returns the first found and the number of set entries.
 func (m metaCacheEntries) firstFound() (first *metaCacheEntry, n int) {
-	for _, entry := range m {
+	for i, entry := range m {
 		if entry.name != "" {
 			n++
 			if first == nil {
-				first = &entry
+				first = &m[i]
 			}
 		}
 	}
@@ -488,7 +504,7 @@ func (m *metaCacheEntriesSorted) fileInfoVersions(bucket, prefix, delimiter, aft
 	return versions
 }
 
-// fileInfoVersions converts the metadata to FileInfoVersions where possible.
+// fileInfos converts the metadata to ObjectInfo where possible.
 // Metadata that cannot be decoded is skipped.
 func (m *metaCacheEntriesSorted) fileInfos(bucket, prefix, delimiter string) (objects []ObjectInfo) {
 	objects = make([]ObjectInfo, 0, m.len())

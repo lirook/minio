@@ -97,21 +97,6 @@ type erasureSets struct {
 	lastConnectDisksOpTime time.Time
 }
 
-// Return false if endpoint is not connected or has been reconnected after last check
-func isEndpointConnectionStable(diskMap map[Endpoint]StorageAPI, endpoint Endpoint, lastCheck time.Time) bool {
-	disk := diskMap[endpoint]
-	if disk == nil {
-		return false
-	}
-	if !disk.IsOnline() {
-		return false
-	}
-	if !lastCheck.IsZero() && disk.LastConn().After(lastCheck) {
-		return false
-	}
-	return true
-}
-
 func (s *erasureSets) getDiskMap() map[Endpoint]StorageAPI {
 	diskMap := make(map[Endpoint]StorageAPI)
 
@@ -209,12 +194,26 @@ func (s *erasureSets) connectDisks() {
 	}()
 
 	var wg sync.WaitGroup
-	setsJustConnected := make([]bool, s.setCount)
 	diskMap := s.getDiskMap()
+	setsJustConnected := make([]bool, s.setCount)
 	for _, endpoint := range s.endpoints.Endpoints {
-		if isEndpointConnectionStable(diskMap, endpoint, s.lastConnectDisksOpTime) {
-			continue
+		cdisk := diskMap[endpoint]
+		if cdisk != nil && cdisk.IsOnline() {
+			if s.lastConnectDisksOpTime.IsZero() {
+				continue
+			}
+
+			// An online-disk means its a valid disk but it may be a re-connected disk
+			// we verify that here based on LastConn(), however we make sure to avoid
+			// putting it back into the s.erasureDisks by re-placing the disk again.
+			_, setIndex, _ := cdisk.GetDiskLoc()
+			if setIndex != -1 {
+				// Recently disconnected disks must go to MRF
+				setsJustConnected[setIndex] = cdisk.LastConn().After(s.lastConnectDisksOpTime)
+				continue
+			}
 		}
+
 		wg.Add(1)
 		go func(endpoint Endpoint) {
 			defer wg.Done()
@@ -222,7 +221,6 @@ func (s *erasureSets) connectDisks() {
 			if err != nil {
 				if endpoint.IsLocal && errors.Is(err, errUnformattedDisk) {
 					globalBackgroundHealState.pushHealLocalDisks(endpoint)
-					logger.Info(fmt.Sprintf("Found unformatted drive %s, attempting to heal...", endpoint))
 				} else {
 					printEndpointError(endpoint, err, true)
 				}
@@ -230,7 +228,6 @@ func (s *erasureSets) connectDisks() {
 			}
 			if disk.IsLocal() && disk.Healing() != nil {
 				globalBackgroundHealState.pushHealLocalDisks(disk.Endpoint())
-				logger.Info(fmt.Sprintf("Found the drive %s that needs healing, attempting to heal...", disk))
 			}
 			s.erasureDisksMu.RLock()
 			setIndex, diskIndex, err := findDiskIndex(s.format, format)
@@ -268,7 +265,7 @@ func (s *erasureSets) connectDisks() {
 				s.erasureDisks[setIndex][diskIndex] = disk
 			}
 			disk.SetDiskLoc(s.poolIndex, setIndex, diskIndex)
-			setsJustConnected[setIndex] = true
+			setsJustConnected[setIndex] = true // disk just went online we treat it is as MRF event
 			s.erasureDisksMu.Unlock()
 		}(endpoint)
 	}
@@ -280,7 +277,7 @@ func (s *erasureSets) connectDisks() {
 			if !justConnected {
 				continue
 			}
-			globalMRFState.newSetReconnected(setIndex, s.poolIndex)
+			globalMRFState.newSetReconnected(s.poolIndex, setIndex)
 		}
 	}()
 }
@@ -508,9 +505,18 @@ func (s *erasureSets) cleanupDeletedObjects(ctx context.Context) {
 			// Reset for the next interval
 			timer.Reset(globalAPIConfig.getDeleteCleanupInterval())
 
+			var wg sync.WaitGroup
 			for _, set := range s.sets {
-				set.cleanupDeletedObjects(ctx)
+				wg.Add(1)
+				go func(set *erasureObjects) {
+					defer wg.Done()
+					if set == nil {
+						return
+					}
+					set.cleanupDeletedObjects(ctx)
+				}(set)
 			}
+			wg.Wait()
 		}
 	}
 }
@@ -527,9 +533,18 @@ func (s *erasureSets) cleanupStaleUploads(ctx context.Context) {
 			// Reset for the next interval
 			timer.Reset(globalAPIConfig.getStaleUploadsCleanupInterval())
 
+			var wg sync.WaitGroup
 			for _, set := range s.sets {
-				set.cleanupStaleUploads(ctx, globalAPIConfig.getStaleUploadsExpiry())
+				wg.Add(1)
+				go func(set *erasureObjects) {
+					defer wg.Done()
+					if set == nil {
+						return
+					}
+					set.cleanupStaleUploads(ctx, globalAPIConfig.getStaleUploadsExpiry())
+				}(set)
 			}
+			wg.Wait()
 		}
 	}
 }
@@ -557,6 +572,7 @@ func (a *auditObjectErasureMap) MarshalJSON() ([]byte, error) {
 	return json.Marshal(mapCopy)
 }
 
+// Add erasure set information to the current context
 func auditObjectErasureSet(ctx context.Context, object string, set *erasureObjects) {
 	if len(logger.AuditTargets()) == 0 {
 		return
@@ -918,21 +934,18 @@ func (s *erasureSets) ListBuckets(ctx context.Context) (buckets []BucketInfo, er
 // GetObjectNInfo - returns object info and locked object ReadCloser
 func (s *erasureSets) GetObjectNInfo(ctx context.Context, bucket, object string, rs *HTTPRangeSpec, h http.Header, lockType LockType, opts ObjectOptions) (gr *GetObjectReader, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.GetObjectNInfo(ctx, bucket, object, rs, h, lockType, opts)
 }
 
 // PutObject - writes an object to hashedSet based on the object name.
 func (s *erasureSets) PutObject(ctx context.Context, bucket string, object string, data *PutObjReader, opts ObjectOptions) (objInfo ObjectInfo, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.PutObject(ctx, bucket, object, data, opts)
 }
 
 // GetObjectInfo - reads object metadata from the hashedSet based on the object name.
 func (s *erasureSets) GetObjectInfo(ctx context.Context, bucket, object string, opts ObjectOptions) (objInfo ObjectInfo, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.GetObjectInfo(ctx, bucket, object, opts)
 }
 
@@ -952,13 +965,11 @@ func (s *erasureSets) deletePrefix(ctx context.Context, bucket string, prefix st
 
 // DeleteObject - deletes an object from the hashedSet based on the object name.
 func (s *erasureSets) DeleteObject(ctx context.Context, bucket string, object string, opts ObjectOptions) (objInfo ObjectInfo, err error) {
-	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
-
 	if opts.DeletePrefix {
 		err := s.deletePrefix(ctx, bucket, object)
 		return ObjectInfo{}, err
 	}
+	set := s.getHashedSet(object)
 	return set.DeleteObject(ctx, bucket, object, opts)
 }
 
@@ -1015,9 +1026,6 @@ func (s *erasureSets) DeleteObjects(ctx context.Context, bucket string, objects 
 			for i, obj := range group {
 				delErrs[obj.origIndex] = errs[i]
 				delObjects[obj.origIndex] = dobjects[i]
-				if errs[i] == nil {
-					auditObjectErasureSet(ctx, obj.object.ObjectName, set)
-				}
 			}
 		}(s.sets[setIdx], objsGroup)
 	}
@@ -1030,8 +1038,6 @@ func (s *erasureSets) DeleteObjects(ctx context.Context, bucket string, objects 
 func (s *erasureSets) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, srcInfo ObjectInfo, srcOpts, dstOpts ObjectOptions) (objInfo ObjectInfo, err error) {
 	srcSet := s.getHashedSet(srcObject)
 	dstSet := s.getHashedSet(dstObject)
-
-	auditObjectErasureSet(ctx, dstObject, dstSet)
 
 	cpSrcDstSame := srcSet == dstSet
 	// Check if this request is only metadata update.
@@ -1071,57 +1077,50 @@ func (s *erasureSets) ListMultipartUploads(ctx context.Context, bucket, prefix, 
 	// In list multipart uploads we are going to treat input prefix as the object,
 	// this means that we are not supporting directory navigation.
 	set := s.getHashedSet(prefix)
-	auditObjectErasureSet(ctx, prefix, set)
 	return set.ListMultipartUploads(ctx, bucket, prefix, keyMarker, uploadIDMarker, delimiter, maxUploads)
 }
 
 // Initiate a new multipart upload on a hashedSet based on object name.
 func (s *erasureSets) NewMultipartUpload(ctx context.Context, bucket, object string, opts ObjectOptions) (uploadID string, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.NewMultipartUpload(ctx, bucket, object, opts)
 }
 
 // Copies a part of an object from source hashedSet to destination hashedSet.
 func (s *erasureSets) CopyObjectPart(ctx context.Context, srcBucket, srcObject, destBucket, destObject string, uploadID string, partID int,
-	startOffset int64, length int64, srcInfo ObjectInfo, srcOpts, dstOpts ObjectOptions) (partInfo PartInfo, err error) {
+	startOffset int64, length int64, srcInfo ObjectInfo, srcOpts, dstOpts ObjectOptions,
+) (partInfo PartInfo, err error) {
 	destSet := s.getHashedSet(destObject)
-	auditObjectErasureSet(ctx, destObject, destSet)
 	return destSet.PutObjectPart(ctx, destBucket, destObject, uploadID, partID, NewPutObjReader(srcInfo.Reader), dstOpts)
 }
 
 // PutObjectPart - writes part of an object to hashedSet based on the object name.
 func (s *erasureSets) PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data *PutObjReader, opts ObjectOptions) (info PartInfo, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.PutObjectPart(ctx, bucket, object, uploadID, partID, data, opts)
 }
 
 // GetMultipartInfo - return multipart metadata info uploaded at hashedSet.
 func (s *erasureSets) GetMultipartInfo(ctx context.Context, bucket, object, uploadID string, opts ObjectOptions) (result MultipartInfo, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.GetMultipartInfo(ctx, bucket, object, uploadID, opts)
 }
 
 // ListObjectParts - lists all uploaded parts to an object in hashedSet.
 func (s *erasureSets) ListObjectParts(ctx context.Context, bucket, object, uploadID string, partNumberMarker int, maxParts int, opts ObjectOptions) (result ListPartsInfo, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.ListObjectParts(ctx, bucket, object, uploadID, partNumberMarker, maxParts, opts)
 }
 
 // Aborts an in-progress multipart operation on hashedSet based on the object name.
 func (s *erasureSets) AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string, opts ObjectOptions) error {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.AbortMultipartUpload(ctx, bucket, object, uploadID, opts)
 }
 
 // CompleteMultipartUpload - completes a pending multipart transaction, on hashedSet based on object name.
 func (s *erasureSets) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, uploadedParts []CompletePart, opts ObjectOptions) (objInfo ObjectInfo, err error) {
 	set := s.getHashedSet(object)
-	auditObjectErasureSet(ctx, object, set)
 	return set.CompleteMultipartUpload(ctx, bucket, object, uploadID, uploadedParts, opts)
 }
 
@@ -1208,24 +1207,6 @@ func formatsToDrivesInfo(endpoints Endpoints, formats []*formatErasureV3, sErrs 
 	return beforeDrives
 }
 
-// If it is a single node Erasure and all disks are root disks, it is most likely a test setup, else it is a production setup.
-// On a test setup we allow creation of format.json on root disks to help with dev/testing.
-func isTestSetup(infos []DiskInfo, errs []error) bool {
-	if globalIsCICD {
-		return true
-	}
-	rootDiskCount := 0
-	for i := range errs {
-		if errs[i] == nil || errs[i] == errUnformattedDisk {
-			if infos[i].RootDisk {
-				rootDiskCount++
-			}
-		}
-	}
-	// It is a test setup if all disks are root disks in quorum.
-	return rootDiskCount >= len(infos)/2+1
-}
-
 func getHealDiskInfos(storageDisks []StorageAPI, errs []error) ([]DiskInfo, []error) {
 	infos := make([]DiskInfo, len(storageDisks))
 	g := errgroup.WithNErrs(len(storageDisks))
@@ -1249,20 +1230,16 @@ func getHealDiskInfos(storageDisks []StorageAPI, errs []error) ([]DiskInfo, []er
 // Mark root disks as down so as not to heal them.
 func markRootDisksAsDown(storageDisks []StorageAPI, errs []error) {
 	if globalIsCICD {
+		// Do nothing
 		return
 	}
-	var infos []DiskInfo
-	infos, errs = getHealDiskInfos(storageDisks, errs)
-	if !isTestSetup(infos, errs) {
-		for i := range storageDisks {
-			if storageDisks[i] != nil && infos[i].RootDisk {
-				// We should not heal on root disk. i.e in a situation where the minio-administrator has unmounted a
-				// defective drive we should not heal a path on the root disk.
-				logger.Info("Disk `%s` the same as the system root disk.\n"+
-					"Disk will not be used. Please supply a separate disk and restart the server.",
-					storageDisks[i].String())
-				storageDisks[i] = nil
-			}
+	infos, _ := getHealDiskInfos(storageDisks, errs)
+	for i := range storageDisks {
+		if storageDisks[i] != nil && infos[i].RootDisk {
+			// We should not heal on root disk. i.e in a situation where the minio-administrator has unmounted a
+			// defective drive we should not heal a path on the root disk.
+			logger.LogIf(GlobalContext, fmt.Errorf("Disk `%s` is part of root disk, will not be used", storageDisks[i]))
+			storageDisks[i] = nil
 		}
 	}
 }

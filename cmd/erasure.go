@@ -29,7 +29,6 @@ import (
 
 	"github.com/minio/madmin-go"
 	"github.com/minio/minio/internal/bpool"
-	"github.com/minio/minio/internal/color"
 	"github.com/minio/minio/internal/dsync"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/sync/errgroup"
@@ -345,7 +344,7 @@ func (er erasureObjects) cleanupDeletedObjects(ctx context.Context) {
 
 // nsScanner will start scanning buckets and send updated totals as they are traversed.
 // Updates are sent on a regular basis and the caller *must* consume them.
-func (er erasureObjects) nsScanner(ctx context.Context, buckets []BucketInfo, bf *bloomFilter, wantCycle uint32, updates chan<- dataUsageCache) error {
+func (er erasureObjects) nsScanner(ctx context.Context, buckets []BucketInfo, bf *bloomFilter, wantCycle uint32, updates chan<- dataUsageCache, healScanMode madmin.HealScanMode) error {
 	if len(buckets) == 0 {
 		return nil
 	}
@@ -353,7 +352,7 @@ func (er erasureObjects) nsScanner(ctx context.Context, buckets []BucketInfo, bf
 	// Collect disks we can use.
 	disks, healing := er.getOnlineDisksWithHealing()
 	if len(disks) == 0 {
-		logger.Info(color.Green("data-scanner:") + " all disks are offline or being healed, skipping scanner")
+		logger.LogIf(ctx, errors.New("data-scanner: all disks are offline or being healed, skipping scanner cycle"))
 		return nil
 	}
 
@@ -491,7 +490,7 @@ func (er erasureObjects) nsScanner(ctx context.Context, buckets []BucketInfo, bf
 				// Calc usage
 				before := cache.Info.LastUpdate
 				var err error
-				cache, err = disk.NSScanner(ctx, cache, updates)
+				cache, err = disk.NSScanner(ctx, cache, updates, healScanMode)
 				cache.Info.BloomFilter = nil
 				if err != nil {
 					if !cache.Info.LastUpdate.IsZero() && cache.Info.LastUpdate.After(before) {

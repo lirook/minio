@@ -364,6 +364,7 @@ func (l *s3EncObjects) GetObjectInfo(ctx context.Context, bucket string, object 
 // CopyObject copies an object from source bucket to a destination bucket.
 func (l *s3EncObjects) CopyObject(ctx context.Context, srcBucket string, srcObject string, dstBucket string, dstObject string, srcInfo minio.ObjectInfo, s, d minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
 	cpSrcDstSame := path.Join(srcBucket, srcObject) == path.Join(dstBucket, dstObject)
+	userDefined := minio.CloneMSS(srcInfo.UserDefined)
 	if cpSrcDstSame {
 		var gwMeta gwMetaV1
 		if s.ServerSideEncryption != nil && d.ServerSideEncryption != nil &&
@@ -378,16 +379,16 @@ func (l *s3EncObjects) CopyObject(ctx context.Context, srcBucket string, srcObje
 				d.ServerSideEncryption.Marshal(header)
 			}
 			for k, v := range header {
-				srcInfo.UserDefined[k] = v[0]
+				userDefined[k] = v[0]
 			}
-			gwMeta.Meta = srcInfo.UserDefined
+			gwMeta.Meta = userDefined
 			if err = l.writeGWMetadata(ctx, dstBucket, getDareMetaPath(dstObject), gwMeta, minio.ObjectOptions{}); err != nil {
 				return objInfo, minio.ErrorRespToObjectError(err)
 			}
 			return gwMeta.ToObjectInfo(dstBucket, dstObject), nil
 		}
 	}
-	dstOpts := minio.ObjectOptions{ServerSideEncryption: d.ServerSideEncryption, UserDefined: srcInfo.UserDefined}
+	dstOpts := minio.ObjectOptions{ServerSideEncryption: d.ServerSideEncryption, UserDefined: userDefined}
 	return l.PutObject(ctx, dstBucket, dstObject, srcInfo.PutObjReader, dstOpts)
 }
 
@@ -549,7 +550,8 @@ func (l *s3EncObjects) PutObjectPart(ctx context.Context, bucket string, object 
 // CopyObjectPart creates a part in a multipart upload by copying
 // existing object or a part of it.
 func (l *s3EncObjects) CopyObjectPart(ctx context.Context, srcBucket, srcObject, destBucket, destObject, uploadID string,
-	partID int, startOffset, length int64, srcInfo minio.ObjectInfo, srcOpts, dstOpts minio.ObjectOptions) (p minio.PartInfo, err error) {
+	partID int, startOffset, length int64, srcInfo minio.ObjectInfo, srcOpts, dstOpts minio.ObjectOptions,
+) (p minio.PartInfo, err error) {
 	return l.PutObjectPart(ctx, destBucket, destObject, uploadID, partID, srcInfo.PutObjReader, dstOpts)
 }
 

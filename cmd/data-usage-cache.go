@@ -369,6 +369,17 @@ func (h dataUsageHash) mod(cycle uint32, cycles uint32) bool {
 	return uint32(xxhash.Sum64String(string(h)))%cycles == cycle%cycles
 }
 
+// modAlt returns true if the hash mod cycles == cycle.
+// This is out of sync with mod.
+// If cycles is 0 false is always returned.
+// If cycles is 1 true is always returned (as expected).
+func (h dataUsageHash) modAlt(cycle uint32, cycles uint32) bool {
+	if cycles <= 1 {
+		return cycles == 1
+	}
+	return uint32(xxhash.Sum64String(string(h))>>32)%(cycles) == cycle%cycles
+}
+
 // addChild will add a child based on its hash.
 // If it already exists it will not be added again.
 func (e *dataUsageEntry) addChild(hash dataUsageHash) {
@@ -524,12 +535,13 @@ func (d *dataUsageCache) dui(path string, buckets []BucketInfo) DataUsageInfo {
 	}
 	flat := d.flatten(*e)
 	dui := DataUsageInfo{
-		LastUpdate:        d.Info.LastUpdate,
-		ObjectsTotalCount: flat.Objects,
-		ObjectsTotalSize:  uint64(flat.Size),
-		BucketsCount:      uint64(len(e.Children)),
-		BucketsUsage:      d.bucketsUsageInfo(buckets),
-		TierStats:         d.tiersUsageInfo(buckets),
+		LastUpdate:         d.Info.LastUpdate,
+		ObjectsTotalCount:  flat.Objects,
+		VersionsTotalCount: flat.Versions,
+		ObjectsTotalSize:   uint64(flat.Size),
+		BucketsCount:       uint64(len(e.Children)),
+		BucketsUsage:       d.bucketsUsageInfo(buckets),
+		TierStats:          d.tiersUsageInfo(buckets),
 	}
 	return dui
 }
@@ -777,6 +789,7 @@ func (d *dataUsageCache) bucketsUsageInfo(buckets []BucketInfo) map[string]Bucke
 		flat := d.flatten(*e)
 		bui := BucketUsageInfo{
 			Size:                 uint64(flat.Size),
+			VersionsCount:        flat.Versions,
 			ObjectsCount:         flat.Objects,
 			ObjectSizesHistogram: flat.ObjSizes.toMap(),
 		}

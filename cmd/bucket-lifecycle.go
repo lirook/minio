@@ -221,17 +221,18 @@ func (t *transitionState) worker(ctx context.Context, objectAPI ObjectLayer) {
 			var err error
 			if tier, err = transitionObject(ctx, objectAPI, oi); err != nil {
 				logger.LogIf(ctx, fmt.Errorf("Transition failed for %s/%s version:%s with %w", oi.Bucket, oi.Name, oi.VersionID, err))
+			} else {
+				ts := tierStats{
+					TotalSize:   uint64(oi.Size),
+					NumVersions: 1,
+				}
+				if oi.IsLatest {
+					ts.NumObjects = 1
+				}
+				t.addLastDayStats(tier, ts)
 			}
 			atomic.AddInt32(&t.activeTasks, -1)
 
-			ts := tierStats{
-				TotalSize:   uint64(oi.Size),
-				NumVersions: 1,
-			}
-			if oi.IsLatest {
-				ts.NumObjects = 1
-			}
-			t.addLastDayStats(tier, ts)
 		}
 	}
 }
@@ -246,11 +247,11 @@ func (t *transitionState) addLastDayStats(tier string, ts tierStats) {
 	t.lastDayStats[tier].addStats(ts)
 }
 
-func (t *transitionState) getDailyAllTierStats() dailyAllTierStats {
+func (t *transitionState) getDailyAllTierStats() DailyAllTierStats {
 	t.lastDayMu.RLock()
 	defer t.lastDayMu.RUnlock()
 
-	res := make(dailyAllTierStats, len(t.lastDayStats))
+	res := make(DailyAllTierStats, len(t.lastDayStats))
 	for tier, st := range t.lastDayStats {
 		res[tier] = st.clone()
 	}
@@ -329,7 +330,7 @@ const (
 // 2. when a transitioned object expires (based on an ILM rule).
 func expireTransitionedObject(ctx context.Context, objectAPI ObjectLayer, oi *ObjectInfo, lcOpts lifecycle.ObjectOpts, action expireAction) error {
 	var opts ObjectOptions
-	opts.Versioned = globalBucketVersioningSys.Enabled(oi.Bucket)
+	opts.Versioned = globalBucketVersioningSys.PrefixEnabled(oi.Bucket, oi.Name)
 	opts.VersionID = lcOpts.VersionID
 	opts.Expiration = ExpirationOptions{Expire: true}
 	switch action {
@@ -414,8 +415,8 @@ func transitionObject(ctx context.Context, objectAPI ObjectLayer, oi ObjectInfo)
 			ETag:   oi.ETag,
 		},
 		VersionID:        oi.VersionID,
-		Versioned:        globalBucketVersioningSys.Enabled(oi.Bucket),
-		VersionSuspended: globalBucketVersioningSys.Suspended(oi.Bucket),
+		Versioned:        globalBucketVersioningSys.PrefixEnabled(oi.Bucket, oi.Name),
+		VersionSuspended: globalBucketVersioningSys.PrefixSuspended(oi.Bucket, oi.Name),
 		MTime:            oi.ModTime,
 	}
 	return tier, objectAPI.TransitionObject(ctx, oi.Bucket, oi.Name, opts)
@@ -574,8 +575,8 @@ func (r *RestoreObjectRequest) validate(ctx context.Context, objAPI ObjectLayer)
 
 // postRestoreOpts returns ObjectOptions with version-id from the POST restore object request for a given bucket and object.
 func postRestoreOpts(ctx context.Context, r *http.Request, bucket, object string) (opts ObjectOptions, err error) {
-	versioned := globalBucketVersioningSys.Enabled(bucket)
-	versionSuspended := globalBucketVersioningSys.Suspended(bucket)
+	versioned := globalBucketVersioningSys.PrefixEnabled(bucket, object)
+	versionSuspended := globalBucketVersioningSys.PrefixSuspended(bucket, object)
 	vid := strings.TrimSpace(r.Form.Get(xhttp.VersionID))
 	if vid != "" && vid != nullVersionID {
 		_, err := uuid.Parse(vid)
@@ -626,8 +627,8 @@ func putRestoreOpts(bucket, object string, rreq *RestoreObjectRequest, objInfo O
 			meta[xhttp.AmzServerSideEncryption] = xhttp.AmzEncryptionAES
 		}
 		return ObjectOptions{
-			Versioned:        globalBucketVersioningSys.Enabled(bucket),
-			VersionSuspended: globalBucketVersioningSys.Suspended(bucket),
+			Versioned:        globalBucketVersioningSys.PrefixEnabled(bucket, object),
+			VersionSuspended: globalBucketVersioningSys.PrefixSuspended(bucket, object),
 			UserDefined:      meta,
 		}
 	}
@@ -639,8 +640,8 @@ func putRestoreOpts(bucket, object string, rreq *RestoreObjectRequest, objInfo O
 	}
 
 	return ObjectOptions{
-		Versioned:        globalBucketVersioningSys.Enabled(bucket),
-		VersionSuspended: globalBucketVersioningSys.Suspended(bucket),
+		Versioned:        globalBucketVersioningSys.PrefixEnabled(bucket, object),
+		VersionSuspended: globalBucketVersioningSys.PrefixSuspended(bucket, object),
 		UserDefined:      meta,
 		VersionID:        objInfo.VersionID,
 		MTime:            objInfo.ModTime,
@@ -693,9 +694,9 @@ func completedRestoreObj(expiry time.Time) restoreObjStatus {
 // String returns x-amz-restore compatible representation of r.
 func (r restoreObjStatus) String() string {
 	if r.Ongoing() {
-		return "ongoing-request=true"
+		return `ongoing-request="true"`
 	}
-	return fmt.Sprintf("ongoing-request=false, expiry-date=%s", r.expiry.Format(http.TimeFormat))
+	return fmt.Sprintf(`ongoing-request="false", expiry-date="%s"`, r.expiry.Format(http.TimeFormat))
 }
 
 // Expiry returns expiry of restored object and true if restore-object has completed.
@@ -739,12 +740,11 @@ func parseRestoreObjStatus(restoreHdr string) (restoreObjStatus, error) {
 	}
 
 	switch progressTokens[1] {
-	case "true":
+	case "true", `"true"`: // true without double quotes is deprecated in Feb 2022
 		if len(tokens) == 1 {
 			return ongoingRestoreObj(), nil
 		}
-
-	case "false":
+	case "false", `"false"`: // false without double quotes is deprecated in Feb 2022
 		if len(tokens) != 2 {
 			return restoreObjStatus{}, errRestoreHDRMalformed
 		}
@@ -755,8 +755,7 @@ func parseRestoreObjStatus(restoreHdr string) (restoreObjStatus, error) {
 		if strings.TrimSpace(expiryTokens[0]) != "expiry-date" {
 			return restoreObjStatus{}, errRestoreHDRMalformed
 		}
-
-		expiry, err := time.Parse(http.TimeFormat, expiryTokens[1])
+		expiry, err := time.Parse(http.TimeFormat, strings.Trim(expiryTokens[1], `"`))
 		if err != nil {
 			return restoreObjStatus{}, errRestoreHDRMalformed
 		}

@@ -28,6 +28,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -299,6 +300,8 @@ func configRetriableErrors(err error) bool {
 }
 
 func initServer(ctx context.Context, newObject ObjectLayer) error {
+	t1 := time.Now()
+
 	// Once the config is fully loaded, initialize the new object layer.
 	setObjectLayer(newObject)
 
@@ -351,7 +354,7 @@ func initServer(ctx context.Context, newObject ObjectLayer) error {
 				// All successful return.
 				if globalIsDistErasure {
 					// These messages only meant primarily for distributed setup, so only log during distributed setup.
-					logger.Info("All MinIO sub-systems initialized successfully")
+					logger.Info("All MinIO sub-systems initialized successfully in %s", time.Since(t1))
 				}
 				return nil
 			}
@@ -401,7 +404,7 @@ func serverMain(ctx *cli.Context) {
 
 	// Initialize globalConsoleSys system
 	globalConsoleSys = NewConsoleLogger(GlobalContext)
-	logger.AddTarget(globalConsoleSys)
+	logger.AddSystemTarget(globalConsoleSys)
 
 	// Perform any self-tests
 	bitrotSelfTest()
@@ -448,6 +451,17 @@ func serverMain(ctx *cli.Context) {
 	// Set system resources to maximum.
 	setMaxResources()
 
+	// Verify kernel release and version.
+	if oldLinux() {
+		logger.Info(color.RedBold("WARNING: Detected Linux kernel version older than 4.0.0 release, there are some known potential performance problems with this kernel version. MinIO recommends a minimum of 4.x.x linux kernel version for best performance"))
+	}
+
+	maxProcs := runtime.GOMAXPROCS(0)
+	cpuProcs := runtime.NumCPU()
+	if maxProcs < cpuProcs {
+		logger.Info(color.RedBold("WARNING: Detected GOMAXPROCS(%d) < NumCPU(%d), please make sure to provide all PROCS to MinIO for optimal performance", maxProcs, cpuProcs))
+	}
+
 	// Configure server.
 	handler, err := configureServerHandler(globalEndpoints)
 	if err != nil {
@@ -493,7 +507,8 @@ func serverMain(ctx *cli.Context) {
 		logFatalErrs(err, Endpoint{}, true)
 	}
 
-	logger.SetDeploymentID(globalDeploymentID)
+	xhttp.SetDeploymentID(globalDeploymentID)
+	xhttp.SetMinIOVersion(Version)
 
 	// Enable background operations for erasure coding
 	if globalIsErasure {
@@ -506,11 +521,11 @@ func serverMain(ctx *cli.Context) {
 	if globalActiveCred.Equal(auth.DefaultCredentials) {
 		msg := fmt.Sprintf("WARNING: Detected default credentials '%s', we recommend that you change these values with 'MINIO_ROOT_USER' and 'MINIO_ROOT_PASSWORD' environment variables",
 			globalActiveCred)
-		logStartupMessage(color.RedBold(msg))
+		logger.Info(color.RedBold(msg))
 	}
 
 	if !globalCLIContext.StrictS3Compat {
-		logStartupMessage(color.RedBold("WARNING: Strict AWS S3 compatible incoming PUT, POST content payload validation is turned off, caution is advised do not use in production"))
+		logger.Info(color.RedBold("WARNING: Strict AWS S3 compatible incoming PUT, POST content payload validation is turned off, caution is advised do not use in production"))
 	}
 
 	if err = initServer(GlobalContext, newObject); err != nil {
@@ -577,6 +592,8 @@ func serverMain(ctx *cli.Context) {
 		if err != nil {
 			logger.LogIf(GlobalContext, fmt.Errorf("Unable to list buckets to heal: %w", err))
 		}
+		// initialize replication resync state.
+		go globalReplicationPool.initResync(GlobalContext, buckets, newObject)
 
 		// Populate existing buckets to the etcd backend
 		if globalDNSConfig != nil {
@@ -592,7 +609,7 @@ func serverMain(ctx *cli.Context) {
 
 		// initialize the new disk cache objects.
 		if globalCacheConfig.Enabled {
-			logStartupMessage(color.Yellow("WARNING: Disk caching is deprecated for single/multi drive MinIO setups. Please migrate to using MinIO S3 gateway instead of disk caching"))
+			logger.Info(color.Yellow("WARNING: Disk caching is deprecated for single/multi drive MinIO setups. Please migrate to using MinIO S3 gateway instead of disk caching"))
 			var cacheAPI CacheObjectLayer
 			cacheAPI, err = newServerCacheObjects(GlobalContext, globalCacheConfig)
 			logger.FatalIf(err, "Unable to initialize disk caching")

@@ -27,6 +27,9 @@ These metrics can be from any MinIO server once per collection.
 | `minio_cluster_capacity_usable_total_bytes`  | Total usable capacity online in the cluster.                                                                        |
 | `minio_cluster_nodes_offline_total`          | Total number of MinIO nodes offline.                                                                                |
 | `minio_cluster_nodes_online_total`           | Total number of MinIO nodes online.                                                                                 |
+| `minio_cluster_ilm_transitioned_bytes`       | Total bytes transitioned to a tier                                                                                  |
+| `minio_cluster_ilm_transitioned_objects`     | Total number of objects transitioned to a tier                                                                      |
+| `minio_cluster_ilm_transitioned_versions`    | Total number of versions transitioned to a tier                                                                     |
 | `minio_heal_objects_error_total`             | Objects for which healing failed in current self healing run                                                        |
 | `minio_heal_objects_heal_total`              | Objects healed in current self healing run                                                                          |
 | `minio_heal_objects_total`                   | Objects scanned in current self healing run                                                                         |
@@ -52,7 +55,7 @@ These metrics can be from any MinIO server once per collection.
 | `minio_s3_requests_error_total`              | Total number S3 requests with errors                                                                                |
 | `minio_s3_requests_inflight_total`           | Total number of S3 requests currently in flight                                                                     |
 | `minio_s3_requests_total`                    | Total number S3 requests                                                                                            |
-| `minio_s3_time_ttbf_seconds_distribution`    | Distribution of the time to first byte across API calls.                                                            |
+| `minio_s3_time_ttfb_seconds_distribution`    | Distribution of the time to first byte across API calls.                                                            |
 | `minio_s3_traffic_received_bytes`            | Total number of s3 bytes received.                                                                                  |
 | `minio_s3_traffic_sent_bytes`                | Total number of s3 bytes sent                                                                                       |
 | `minio_software_commit_info`                 | Git commit hash for the MinIO release.                                                                              |

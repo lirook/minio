@@ -19,6 +19,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,25 +27,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/minio/minio/internal/logger"
 
-	"github.com/minio/minio/internal/sync/errgroup"
 	"github.com/minio/pkg/bucket/policy"
 )
-
-func concurrentDecryptETag(ctx context.Context, objects []ObjectInfo) {
-	g := errgroup.WithNErrs(len(objects)).WithConcurrency(500)
-	for index := range objects {
-		index := index
-		g.Go(func() error {
-			size, err := objects[index].GetActualSize()
-			if err == nil {
-				objects[index].Size = size
-			}
-			objects[index].ETag = objects[index].GetActualETag(nil)
-			return nil
-		}, index)
-	}
-	g.Wait()
-}
 
 // Validate all the ListObjects query arguments, returns an APIErrorCode
 // if one of the args do not meet the required conditions.
@@ -116,7 +100,11 @@ func (api objectAPIHandlers) ListObjectVersionsHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	concurrentDecryptETag(ctx, listObjectVersionsInfo.Objects)
+	if err = DecryptETags(ctx, GlobalKMS, listObjectVersionsInfo.Objects); err != nil {
+		logger.LogIf(ctx, fmt.Errorf("Failed to decrypt ETag: %v", err)) // TODO(aead): Remove once we are confident that decryption does not fail accidentially
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		return
+	}
 
 	response := generateListVersionsResponse(bucket, prefix, marker, versionIDMarker, delimiter, encodingType, maxkeys, listObjectVersionsInfo)
 
@@ -178,7 +166,11 @@ func (api objectAPIHandlers) ListObjectsV2MHandler(w http.ResponseWriter, r *htt
 		return
 	}
 
-	concurrentDecryptETag(ctx, listObjectsV2Info.Objects)
+	if err = DecryptETags(ctx, GlobalKMS, listObjectsV2Info.Objects); err != nil {
+		logger.LogIf(ctx, fmt.Errorf("Failed to decrypt ETag: %v", err)) // TODO(aead): Remove once we are confident that decryption does not fail accidentially
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		return
+	}
 
 	// The next continuation token has id@node_index format to optimize paginated listing
 	nextContinuationToken := listObjectsV2Info.NextContinuationToken
@@ -253,7 +245,11 @@ func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http
 		return
 	}
 
-	concurrentDecryptETag(ctx, listObjectsV2Info.Objects)
+	if err = DecryptETags(ctx, GlobalKMS, listObjectsV2Info.Objects); err != nil {
+		logger.LogIf(ctx, fmt.Errorf("Failed to decrypt ETag: %v", err)) // TODO(aead): Remove once we are confident that decryption does not fail accidentially
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		return
+	}
 
 	response := generateListObjectsV2Response(bucket, prefix, token, listObjectsV2Info.NextContinuationToken, startAfter,
 		delimiter, encodingType, fetchOwner, listObjectsV2Info.IsTruncated,
@@ -350,7 +346,11 @@ func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http
 		return
 	}
 
-	concurrentDecryptETag(ctx, listObjectsInfo.Objects)
+	if err = DecryptETags(ctx, GlobalKMS, listObjectsInfo.Objects); err != nil {
+		logger.LogIf(ctx, fmt.Errorf("Failed to decrypt ETag: %v", err)) // TODO(aead): Remove once we are confident that decryption does not fail accidentially
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		return
+	}
 
 	response := generateListObjectsV1Response(bucket, prefix, marker, delimiter, encodingType, maxKeys, listObjectsInfo)
 

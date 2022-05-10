@@ -40,12 +40,14 @@ var (
 	errTierInsufficientCreds = errors.New("insufficient tier credentials supplied")
 	errTierBackendInUse      = errors.New("remote tier backend already in use")
 	errTierTypeUnsupported   = errors.New("unsupported tier type")
+	errTierBackendNotEmpty   = errors.New("remote tier not empty")
 )
 
 const (
 	tierConfigFile    = "tier-config.bin"
 	tierConfigFormat  = 1
-	tierConfigVersion = 1
+	tierConfigV1      = 1
+	tierConfigVersion = 2
 
 	minioHotTier = "STANDARD"
 )
@@ -116,8 +118,40 @@ func (config *TierConfigMgr) Add(ctx context.Context, tier madmin.TierConfig) er
 	return nil
 }
 
+// Remove removes tier if it is empty.
+func (config *TierConfigMgr) Remove(ctx context.Context, tier string) error {
+	d, err := config.getDriver(tier)
+	if err != nil {
+		return err
+	}
+	if inuse, err := d.InUse(ctx); err != nil {
+		return err
+	} else if inuse {
+		return errTierBackendNotEmpty
+	} else {
+		config.Lock()
+		delete(config.Tiers, tier)
+		delete(config.drivercache, tier)
+		config.Unlock()
+	}
+	return nil
+}
+
+// Verify verifies if tier's config is valid by performing all supported
+// operations on the corresponding warmbackend.
+func (config *TierConfigMgr) Verify(ctx context.Context, tier string) error {
+	d, err := config.getDriver(tier)
+	if err != nil {
+		return err
+	}
+	return checkWarmBackend(ctx, d)
+}
+
 // Empty returns if tier targets are empty
 func (config *TierConfigMgr) Empty() bool {
+	if config == nil {
+		return true
+	}
 	return len(config.ListTiers()) == 0
 }
 
@@ -171,6 +205,12 @@ func (config *TierConfigMgr) Edit(ctx context.Context, tierName string, creds ma
 			return errTierInsufficientCreds
 		}
 		cfg.GCS.Creds = base64.URLEncoding.EncodeToString(creds.CredsJSON)
+	case madmin.MinIO:
+		if creds.AccessKey == "" || creds.SecretKey == "" {
+			return errTierInsufficientCreds
+		}
+		cfg.MinIO.AccessKey = creds.AccessKey
+		cfg.MinIO.SecretKey = creds.SecretKey
 	}
 
 	d, err := newWarmBackend(ctx, cfg)
@@ -342,22 +382,22 @@ func loadTierConfig(ctx context.Context, objAPI ObjectLayer) (*TierConfigMgr, er
 	}
 
 	// Read header
-	switch binary.LittleEndian.Uint16(data[0:2]) {
+	switch format := binary.LittleEndian.Uint16(data[0:2]); format {
 	case tierConfigFormat:
 	default:
-		return nil, fmt.Errorf("tierConfigInit: unknown format: %d", binary.LittleEndian.Uint16(data[0:2]))
-	}
-	switch binary.LittleEndian.Uint16(data[2:4]) {
-	case tierConfigVersion:
-	default:
-		return nil, fmt.Errorf("tierConfigInit: unknown version: %d", binary.LittleEndian.Uint16(data[2:4]))
+		return nil, fmt.Errorf("tierConfigInit: unknown format: %d", format)
 	}
 
 	cfg := NewTierConfigMgr()
-	_, decErr := cfg.UnmarshalMsg(data[4:])
-	if decErr != nil {
-		return nil, decErr
+	switch version := binary.LittleEndian.Uint16(data[2:4]); version {
+	case tierConfigV1, tierConfigVersion:
+		if _, decErr := cfg.UnmarshalMsg(data[4:]); decErr != nil {
+			return nil, decErr
+		}
+	default:
+		return nil, fmt.Errorf("tierConfigInit: unknown version: %d", version)
 	}
+
 	return cfg, nil
 }
 

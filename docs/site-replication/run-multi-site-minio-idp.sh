@@ -20,6 +20,7 @@ unset MINIO_KMS_KES_KEY_FILE
 unset MINIO_KMS_KES_ENDPOINT
 unset MINIO_KMS_KES_KEY_NAME
 
+export MINIO_CI_CD=1
 export MINIO_BROWSER=off
 export MINIO_ROOT_USER="minio"
 export MINIO_ROOT_PASSWORD="minio123"
@@ -169,6 +170,17 @@ fi
 ./mc stat minio3/newbucket
 if [ $? -ne 0 ]; then
     echo "expecting bucket to be present. exiting.."
+    exit_1;
+fi
+
+err_minio2=$(./mc stat minio2/newbucket/xxx --json | jq -r .error.cause.message)
+if [ $? -ne 0 ]; then
+    echo "expecting object to be missing. exiting.."
+    exit_1;
+fi
+
+if [ "${err_minio2}" != "Object does not exist" ]; then
+    echo "expected to see Object does not exist error, exiting..."
     exit_1;
 fi
 

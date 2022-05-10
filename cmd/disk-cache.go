@@ -19,7 +19,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,8 +31,8 @@ import (
 	objectlock "github.com/minio/minio/internal/bucket/object/lock"
 	"github.com/minio/minio/internal/color"
 	"github.com/minio/minio/internal/config/cache"
+	"github.com/minio/minio/internal/disk"
 	"github.com/minio/minio/internal/hash"
-	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/sync/errgroup"
 	"github.com/minio/pkg/wildcard"
@@ -595,14 +594,25 @@ func newCache(config cache.Config) ([]*diskCache, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	var warningMsg string
 	for i, dir := range config.Drives {
 		// skip diskCache creation for cache drives missing a format.json
 		if formats[i] == nil {
 			caches = append(caches, nil)
 			continue
 		}
+		if !globalIsCICD && len(warningMsg) == 0 {
+			rootDsk, err := disk.IsRootDisk(dir, "/")
+			if err != nil {
+				warningMsg = fmt.Sprintf("Invalid cache dir %s err : %s", dir, err.Error())
+			}
+			if rootDsk {
+				warningMsg = fmt.Sprintf("cache dir cannot be part of root disk: %s", dir)
+			}
+		}
+
 		if err := checkAtimeSupport(dir); err != nil {
-			return nil, false, errors.New("Atime support required for disk caching")
+			return nil, false, fmt.Errorf("Atime support required for disk caching, atime check failed with %w", err)
 		}
 
 		cache, err := newDiskCache(ctx, dir, config)
@@ -611,11 +621,14 @@ func newCache(config cache.Config) ([]*diskCache, bool, error) {
 		}
 		caches = append(caches, cache)
 	}
+	if warningMsg != "" {
+		logger.Info(color.Yellow(fmt.Sprintf("WARNING: Usage of root disk for disk caching is deprecated: %s", warningMsg)))
+	}
 	return caches, migrating, nil
 }
 
 func (c *cacheObjects) migrateCacheFromV1toV2(ctx context.Context) {
-	logStartupMessage(color.Blue("Cache migration initiated ...."))
+	logger.Info(color.Blue("Cache migration initiated ...."))
 
 	g := errgroup.WithNErrs(len(c.cache))
 	for index, dc := range c.cache {
@@ -644,7 +657,7 @@ func (c *cacheObjects) migrateCacheFromV1toV2(ctx context.Context) {
 
 	// update migration status
 	c.migrating = false
-	logStartupMessage(color.Blue("Cache migration completed successfully."))
+	logger.Info(color.Blue("Cache migration completed successfully."))
 }
 
 // PutObject - caches the uploaded object for single Put operations
@@ -725,35 +738,30 @@ func (c *cacheObjects) PutObject(ctx context.Context, bucket, object string, r *
 	// Initialize pipe to stream data to cache
 	rPipe, wPipe := io.Pipe()
 	infoCh := make(chan ObjectInfo)
-	errorCh := make(chan error)
 	go func() {
+		defer close(infoCh)
 		info, err := putObjectFn(ctx, bucket, object, NewPutObjReader(hashReader), opts)
-		if err != nil {
-			close(infoCh)
-			pipeReader.CloseWithError(err)
-			rPipe.CloseWithError(err)
-			errorCh <- err
-			return
+		pipeReader.CloseWithError(err)
+		rPipe.CloseWithError(err)
+		if err == nil {
+			infoCh <- info
 		}
-		close(errorCh)
-		infoCh <- info
 	}()
 
 	go func() {
 		_, err := dcache.put(lkctx.Context(), bucket, object, rPipe, r.Size(), nil, opts, false, false)
 		if err != nil {
-			rPipe.CloseWithError(err)
-			return
+			logger.LogIf(lkctx.Context(), err)
 		}
+		// We do not care about errors to cached backend.
+		rPipe.Close()
 	}()
 
 	mwriter := cacheMultiWriter(pipeWriter, wPipe)
 	_, err = io.Copy(mwriter, r)
 	pipeWriter.Close()
 	wPipe.Close()
-
 	if err != nil {
-		err = <-errorCh
 		return ObjectInfo{}, err
 	}
 	info := <-infoCh
@@ -789,8 +797,7 @@ func (c *cacheObjects) uploadObject(ctx context.Context, oi ObjectInfo) {
 		return
 	}
 	var opts ObjectOptions
-	opts.UserDefined = make(map[string]string)
-	opts.UserDefined[xhttp.ContentMD5] = oi.UserDefined["content-md5"]
+	opts.UserDefined = cloneMSS(oi.UserDefined)
 	objInfo, err := c.InnerPutObjectFn(ctx, oi.Bucket, oi.Name, NewPutObjReader(hashReader), opts)
 	wbCommitStatus := CommitComplete
 	size := objInfo.Size

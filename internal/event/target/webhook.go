@@ -119,10 +119,17 @@ func (target *WebhookTarget) IsActive() (bool, error) {
 		}
 		return false, err
 	}
+	tokens := strings.Fields(target.args.AuthToken)
+	switch len(tokens) {
+	case 2:
+		req.Header.Set("Authorization", target.args.AuthToken)
+	case 1:
+		req.Header.Set("Authorization", "Bearer "+target.args.AuthToken)
+	}
 
 	resp, err := target.httpClient.Do(req)
 	if err != nil {
-		if xnet.IsNetworkOrHostDown(err, false) || errors.Is(err, context.DeadlineExceeded) {
+		if xnet.IsNetworkOrHostDown(err, true) {
 			return false, errNotConnected
 		}
 		return false, err
@@ -133,7 +140,8 @@ func (target *WebhookTarget) IsActive() (bool, error) {
 	return true, nil
 }
 
-// Save - saves the events to the store if queuestore is configured, which will be replayed when the wenhook connection is active.
+// Save - saves the events to the store if queuestore is configured,
+// which will be replayed when the webhook connection is active.
 func (target *WebhookTarget) Save(eventData event.Event) error {
 	if target.store != nil {
 		return target.store.Put(eventData)
@@ -220,8 +228,6 @@ func (target *WebhookTarget) Send(eventKey string) error {
 
 // Close - does nothing and available for interface compatibility.
 func (target *WebhookTarget) Close() error {
-	// Close idle connection with "keep-alive" states
-	target.httpClient.CloseIdleConnections()
 	return nil
 }
 

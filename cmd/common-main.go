@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/gob"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -32,6 +33,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -100,12 +102,16 @@ func init() {
 		PersistOnFailure: false,
 	}
 
+	globalIsCICD = env.Get("MINIO_CI_CD", "") != "" || env.Get("CI", "") != ""
+
+	containers := IsKubernetes() || IsDocker() || IsBOSH() || IsDCOS() || IsPCFTile()
+
 	// Call to refresh will refresh names in cache. If you pass true, it will also
 	// remove cached names not looked up since the last call to Refresh. It is a good idea
 	// to call this method on a regular interval.
 	go func() {
 		var t *time.Ticker
-		if IsKubernetes() || IsDocker() || IsBOSH() || IsDCOS() || IsPCFTile() {
+		if containers {
 			t = time.NewTicker(1 * time.Minute)
 		} else {
 			t = time.NewTicker(10 * time.Minute)
@@ -172,6 +178,13 @@ func minioConfigToConsoleFeatures() {
 			os.Setenv("CONSOLE_LOG_QUERY_AUTH_TOKEN", value)
 		}
 	}
+	// pass the console subpath configuration
+	if value := env.Get(config.EnvMinIOBrowserRedirectURL, ""); value != "" {
+		subPath := path.Clean(pathJoin(strings.TrimSpace(globalBrowserRedirectURL.Path), SlashSeparator))
+		if subPath != SlashSeparator {
+			os.Setenv("CONSOLE_SUBPATH", subPath)
+		}
+	}
 	// Enable if prometheus URL is set.
 	if value := env.Get("MINIO_PROMETHEUS_URL", ""); value != "" {
 		os.Setenv("CONSOLE_PROMETHEUS_URL", value)
@@ -184,23 +197,23 @@ func minioConfigToConsoleFeatures() {
 		os.Setenv("CONSOLE_LDAP_ENABLED", config.EnableOn)
 	}
 	// if IDP is enabled, set IDP environment variables
-	if globalOpenIDConfig.URL != nil {
-		os.Setenv("CONSOLE_IDP_URL", globalOpenIDConfig.URL.String())
-		os.Setenv("CONSOLE_IDP_CLIENT_ID", globalOpenIDConfig.ClientID)
-		os.Setenv("CONSOLE_IDP_SECRET", globalOpenIDConfig.ClientSecret)
+	if globalOpenIDConfig.ProviderCfgs[config.Default] != nil {
+		os.Setenv("CONSOLE_IDP_URL", globalOpenIDConfig.ProviderCfgs[config.Default].URL.String())
+		os.Setenv("CONSOLE_IDP_CLIENT_ID", globalOpenIDConfig.ProviderCfgs[config.Default].ClientID)
+		os.Setenv("CONSOLE_IDP_SECRET", globalOpenIDConfig.ProviderCfgs[config.Default].ClientSecret)
 		os.Setenv("CONSOLE_IDP_HMAC_SALT", globalDeploymentID)
-		os.Setenv("CONSOLE_IDP_HMAC_PASSPHRASE", globalOpenIDConfig.ClientID)
-		os.Setenv("CONSOLE_IDP_SCOPES", strings.Join(globalOpenIDConfig.DiscoveryDoc.ScopesSupported, ","))
-		if globalOpenIDConfig.ClaimUserinfo {
+		os.Setenv("CONSOLE_IDP_HMAC_PASSPHRASE", globalOpenIDConfig.ProviderCfgs[config.Default].ClientID)
+		os.Setenv("CONSOLE_IDP_SCOPES", strings.Join(globalOpenIDConfig.ProviderCfgs[config.Default].DiscoveryDoc.ScopesSupported, ","))
+		if globalOpenIDConfig.ProviderCfgs[config.Default].ClaimUserinfo {
 			os.Setenv("CONSOLE_IDP_USERINFO", config.EnableOn)
 		}
-		if globalOpenIDConfig.RedirectURIDynamic {
+		if globalOpenIDConfig.ProviderCfgs[config.Default].RedirectURIDynamic {
 			// Enable dynamic redirect-uri's based on incoming 'host' header,
 			// Overrides any other callback URL.
 			os.Setenv("CONSOLE_IDP_CALLBACK_DYNAMIC", config.EnableOn)
 		}
-		if globalOpenIDConfig.RedirectURI != "" {
-			os.Setenv("CONSOLE_IDP_CALLBACK", globalOpenIDConfig.RedirectURI)
+		if globalOpenIDConfig.ProviderCfgs[config.Default].RedirectURI != "" {
+			os.Setenv("CONSOLE_IDP_CALLBACK", globalOpenIDConfig.ProviderCfgs[config.Default].RedirectURI)
 		} else {
 			os.Setenv("CONSOLE_IDP_CALLBACK", getConsoleEndpoints()[0]+"/oauth_callback")
 		}
@@ -327,7 +340,7 @@ func checkUpdate(mode string) {
 		return
 	}
 
-	logStartupMessage(prepareUpdateMessage("\nRun `mc admin update`", lrTime.Sub(crTime)))
+	logger.Info(prepareUpdateMessage("Run `mc admin update`", lrTime.Sub(crTime)))
 }
 
 func newConfigDirFromCtx(ctx *cli.Context, option string, getDefaultDir func() string) (*ConfigDir, bool) {
@@ -482,6 +495,13 @@ func parsEnvEntry(envEntry string) (envKV, error) {
 	key := envTokens[0]
 	val := envTokens[1]
 
+	if strings.HasPrefix(key, "#") {
+		// Skip commented lines
+		return envKV{
+			Skip: true,
+		}, nil
+	}
+
 	// Remove quotes from the value if found
 	if len(val) >= 2 {
 		quote := val[0]
@@ -625,12 +645,11 @@ func handleCommonEnvVars() {
 			}
 			// Look for if URL has invalid values and return error.
 			if !((u.Scheme == "http" || u.Scheme == "https") &&
-				(u.Path == "/" || u.Path == "") && u.Opaque == "" &&
+				u.Opaque == "" &&
 				!u.ForceQuery && u.RawQuery == "" && u.Fragment == "") {
 				err := fmt.Errorf("URL contains unexpected resources, expected URL to be of http(s)://minio.example.com format: %v", u)
 				logger.Fatal(err, "Invalid MINIO_BROWSER_REDIRECT_URL value is environment variable")
 			}
-			u.Path = "" // remove any path component such as `/`
 			globalBrowserRedirectURL = u
 		}
 	}
@@ -663,8 +682,6 @@ func handleCommonEnvVars() {
 		}
 		globalRootDiskThreshold = size
 	}
-
-	globalIsCICD = env.Get("MINIO_CI_CD", "") != ""
 
 	domains := env.Get(config.EnvDomain, "")
 	if len(domains) != 0 {
@@ -762,7 +779,7 @@ func handleCommonEnvVars() {
 				"         Please use %s and %s",
 				config.EnvAccessKey, config.EnvSecretKey,
 				config.EnvRootUser, config.EnvRootPassword)
-			logStartupMessage(color.RedBold(msg))
+			logger.Info(color.RedBold(msg))
 		}
 		globalActiveCred = cred
 	}
@@ -796,7 +813,29 @@ func handleCommonEnvVars() {
 				endpoints = append(endpoints, strings.Join(lbls, ""))
 			}
 		}
-		certificate, err := tls.LoadX509KeyPair(env.Get(config.EnvKESClientCert, ""), env.Get(config.EnvKESClientKey, ""))
+		// Manually load the certificate and private key into memory.
+		// We need to check whether the private key is encrypted, and
+		// if so, decrypt it using the user-provided password.
+		certBytes, err := os.ReadFile(env.Get(config.EnvKESClientCert, ""))
+		if err != nil {
+			logger.Fatal(err, "Unable to load KES client certificate as specified by the shell environment")
+		}
+		keyBytes, err := os.ReadFile(env.Get(config.EnvKESClientKey, ""))
+		if err != nil {
+			logger.Fatal(err, "Unable to load KES client private key as specified by the shell environment")
+		}
+		privateKeyPEM, rest := pem.Decode(bytes.TrimSpace(keyBytes))
+		if len(rest) != 0 {
+			logger.Fatal(errors.New("private key contains additional data"), "Unable to load KES client private key as specified by the shell environment")
+		}
+		if x509.IsEncryptedPEMBlock(privateKeyPEM) {
+			keyBytes, err = x509.DecryptPEMBlock(privateKeyPEM, []byte(env.Get(config.EnvKESClientPassword, "")))
+			if err != nil {
+				logger.Fatal(err, "Unable to decrypt KES client private key as specified by the shell environment")
+			}
+			keyBytes = pem.EncodeToMemory(&pem.Block{Type: privateKeyPEM.Type, Bytes: keyBytes})
+		}
+		certificate, err := tls.X509KeyPair(certBytes, keyBytes)
 		if err != nil {
 			logger.Fatal(err, "Unable to load KES client certificate as specified by the shell environment")
 		}
@@ -825,13 +864,6 @@ func handleCommonEnvVars() {
 		}
 		GlobalKMS = KMS
 	}
-}
-
-func logStartupMessage(msg string) {
-	if globalConsoleSys != nil {
-		globalConsoleSys.Send(msg, string(logger.All))
-	}
-	logger.StartupMessage(msg)
 }
 
 func getTLSConfig() (x509Certs []*x509.Certificate, manager *certs.Manager, secureConn bool, err error) {
@@ -909,6 +941,9 @@ func getTLSConfig() (x509Certs []*x509.Certificate, manager *certs.Manager, secu
 		}
 	}
 	secureConn = true
+
+	// Certs might be symlinks, reload them every 10 seconds.
+	manager.UpdateReloadDuration(10 * time.Second)
 
 	// syscall.SIGHUP to reload the certs.
 	manager.ReloadOnSignal(syscall.SIGHUP)

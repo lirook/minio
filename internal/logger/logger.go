@@ -32,6 +32,7 @@ import (
 
 	"github.com/minio/highwayhash"
 	"github.com/minio/minio-go/v7/pkg/set"
+	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger/message/log"
 )
 
@@ -52,8 +53,6 @@ const (
 )
 
 var trimStrings []string
-
-var globalDeploymentID string
 
 // TimeFormat - logging time format.
 const TimeFormat string = "15:04:05 MST 01/02/2006"
@@ -128,11 +127,6 @@ func uniqueEntries(paths []string) []string {
 		}
 	}
 	return m.ToSlice()
-}
-
-// SetDeploymentID -- Deployment Id from the main package is set here
-func SetDeploymentID(deploymentID string) {
-	globalDeploymentID = deploymentID
 }
 
 // Init sets the trimStrings to possible GOPATHs
@@ -319,7 +313,7 @@ func logIf(ctx context.Context, err error, errKind ...interface{}) {
 	// Get the cause for the Error
 	message := fmt.Sprintf("%v (%T)", err, err)
 	if req.DeploymentID == "" {
-		req.DeploymentID = globalDeploymentID
+		req.DeploymentID = xhttp.GlobalDeploymentID
 	}
 
 	objects := make([]log.ObjectVersion, 0, len(req.Objects))
@@ -364,9 +358,12 @@ func logIf(ctx context.Context, err error, errKind ...interface{}) {
 	}
 
 	// Iterate over all logger targets to send the log entry
-	for _, t := range Targets() {
+	for _, t := range SystemTargets() {
 		if err := t.Send(entry, entry.LogKind); err != nil {
-			LogAlwaysIf(context.Background(), fmt.Errorf("event(%v) was not sent to Logger target (%v): %v", entry, t, err), entry.LogKind)
+			if consoleTgt != nil {
+				entry.Trace.Message = fmt.Sprintf("event(%#v) was not sent to Logger target (%#v): %#v", entry, t, err)
+				consoleTgt.Send(entry, entry.LogKind)
+			}
 		}
 	}
 }
