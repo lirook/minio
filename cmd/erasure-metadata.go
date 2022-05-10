@@ -107,7 +107,7 @@ func (fi FileInfo) IsValid() bool {
 func (fi FileInfo) ToObjectInfo(bucket, object string) ObjectInfo {
 	object = decodeDirObject(object)
 	versionID := fi.VersionID
-	if (globalBucketVersioningSys.Enabled(bucket) || globalBucketVersioningSys.Suspended(bucket)) && versionID == "" {
+	if (globalBucketVersioningSys.PrefixEnabled(bucket, object) || globalBucketVersioningSys.PrefixSuspended(bucket, object)) && versionID == "" {
 		versionID = nullVersionID
 	}
 
@@ -475,6 +475,18 @@ func (fi *FileInfo) SetTierFreeVersion() {
 func (fi *FileInfo) TierFreeVersion() bool {
 	_, ok := fi.Metadata[ReservedMetadataPrefixLower+tierFVMarker]
 	return ok
+}
+
+// IsRestoreObjReq returns true if fi corresponds to a RestoreObject request.
+func (fi *FileInfo) IsRestoreObjReq() bool {
+	if restoreHdr, ok := fi.Metadata[xhttp.AmzRestore]; ok {
+		if restoreStatus, err := parseRestoreObjStatus(restoreHdr); err == nil {
+			if !restoreStatus.Ongoing() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // VersionPurgeStatus returns overall version purge status for this object version across targets

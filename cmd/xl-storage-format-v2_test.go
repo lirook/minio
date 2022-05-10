@@ -18,10 +18,16 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
+	"os"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -33,6 +39,29 @@ import (
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/ioutil"
 )
+
+func TestReadXLMetaNoData(t *testing.T) {
+	f, err := os.Open("testdata/xl.meta-corrupt.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(bufio.NewReader(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = readXLMetaNoData(bytes.NewReader(buf), int64(len(buf)))
+	if err == nil {
+		t.Fatal("expected error but returned success")
+	}
+}
 
 func TestXLV2FormatData(t *testing.T) {
 	failOnErr := func(err error) {
@@ -366,13 +395,62 @@ func TestDeleteVersionWithSharedDataDir(t *testing.T) {
 	count := len(testCases)
 	for i := 4; i < len(testCases); i++ {
 		tc := testCases[i]
-		dataDir, _, err := xl.DeleteVersion(fileInfos[i])
+		dataDir, err := xl.DeleteVersion(fileInfos[i])
 		failOnErr(count+1, err)
 		if dataDir != tc.expectedDataDir {
 			t.Fatalf("Expected %s but got %s", tc.expectedDataDir, dataDir)
 		}
 		count++
 	}
+}
+
+func Benchmark_mergeXLV2Versions(b *testing.B) {
+	data, err := ioutil.ReadFile("testdata/xl.meta-v1.2.zst")
+	if err != nil {
+		b.Fatal(err)
+	}
+	dec, _ := zstd.NewReader(nil)
+	data, err = dec.DecodeAll(data, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var xl xlMetaV2
+	if err = xl.LoadOrConvert(data); err != nil {
+		b.Fatal(err)
+	}
+
+	vers := make([][]xlMetaV2ShallowVersion, 16)
+	for i := range vers {
+		vers[i] = xl.versions
+	}
+
+	b.Run("requested-none", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.SetBytes(855) // number of versions...
+		for i := 0; i < b.N; i++ {
+			mergeXLV2Versions(8, false, 0, vers...)
+		}
+	})
+
+	b.Run("requested-v1", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.SetBytes(855) // number of versions...
+		for i := 0; i < b.N; i++ {
+			mergeXLV2Versions(8, false, 1, vers...)
+		}
+	})
+
+	b.Run("requested-v2", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.SetBytes(855) // number of versions...
+		for i := 0; i < b.N; i++ {
+			mergeXLV2Versions(8, false, 1, vers...)
+		}
+	})
 }
 
 func Benchmark_xlMetaV2Shallow_Load(b *testing.B) {
@@ -398,6 +476,7 @@ func Benchmark_xlMetaV2Shallow_Load(b *testing.B) {
 			}
 		}
 	})
+
 	b.Run("indexed", func(b *testing.B) {
 		var xl xlMetaV2
 		err = xl.Load(data)
@@ -524,7 +603,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 
 	for i := range vers {
 		t.Run(fmt.Sprintf("non-strict-q%d", i), func(t *testing.T) {
-			merged := mergeXLV2Versions(i, false, vers...)
+			merged := mergeXLV2Versions(i, false, 0, vers...)
 			if len(merged) == 0 {
 				t.Error("Did not get any results")
 				return
@@ -536,7 +615,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 			}
 		})
 		t.Run(fmt.Sprintf("strict-q%d", i), func(t *testing.T) {
-			merged := mergeXLV2Versions(i, true, vers...)
+			merged := mergeXLV2Versions(i, true, 0, vers...)
 			if len(merged) == 0 {
 				t.Error("Did not get any results")
 				return
@@ -558,7 +637,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, false, vMod...)
+			merged := mergeXLV2Versions(i, false, 0, vMod...)
 			if len(merged) == 0 {
 				t.Error("Did not get any results")
 				return
@@ -580,7 +659,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, false, vMod...)
+			merged := mergeXLV2Versions(i, false, 0, vMod...)
 			if len(merged) == 0 && i < 2 {
 				t.Error("Did not get any results")
 				return
@@ -606,7 +685,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, false, vMod...)
+			merged := mergeXLV2Versions(i, false, 0, vMod...)
 			if len(merged) == 0 {
 				t.Error("Did not get any results")
 				return
@@ -628,7 +707,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, false, vMod...)
+			merged := mergeXLV2Versions(i, false, 0, vMod...)
 			if len(merged) == 0 && i < 2 {
 				t.Error("Did not get any results")
 				return
@@ -654,7 +733,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, true, vMod...)
+			merged := mergeXLV2Versions(i, true, 0, vMod...)
 			if len(merged) == 0 && i < 2 {
 				t.Error("Did not get any results")
 				return
@@ -680,7 +759,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, true, vMod...)
+			merged := mergeXLV2Versions(i, true, 0, vMod...)
 			if len(merged) == 0 && i < 2 {
 				t.Error("Did not get any results")
 				return
@@ -706,7 +785,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, true, vMod...)
+			merged := mergeXLV2Versions(i, true, 0, vMod...)
 			if len(merged) == 0 && i < 2 {
 				t.Error("Did not get any results")
 				return
@@ -732,7 +811,7 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				}
 				vMod = append(vMod, newVers)
 			}
-			merged := mergeXLV2Versions(i, true, vMod...)
+			merged := mergeXLV2Versions(i, true, 0, vMod...)
 			if len(merged) == 0 && i < 2 {
 				t.Error("Did not get any results")
 				return
@@ -745,6 +824,131 @@ func Test_mergeXLV2Versions(t *testing.T) {
 				if ver.header.Type == invalidVersionType {
 					t.Errorf("Invalid result returned: %v", ver.header)
 				}
+			}
+		})
+	}
+}
+
+func Test_mergeXLV2Versions2(t *testing.T) {
+	vDelMarker := xlMetaV2ShallowVersion{header: xlMetaV2VersionHeader{
+		VersionID: [16]byte{2},
+		ModTime:   1500,
+		Signature: [4]byte{5, 6, 7, 8},
+		Type:      DeleteType,
+		Flags:     0,
+	}}
+	vDelMarker.meta, _ = base64.StdEncoding.DecodeString("gqRUeXBlAqZEZWxPYmqDoklExBCvwGEaY+BAO4B4vyG5ERorpU1UaW1l0xbgJlsWE9IHp01ldGFTeXOA")
+
+	vObj := xlMetaV2ShallowVersion{header: xlMetaV2VersionHeader{
+		VersionID: [16]byte{1},
+		ModTime:   1000,
+		Signature: [4]byte{1, 2, 3, 4},
+		Type:      ObjectType,
+		Flags:     xlFlagUsesDataDir | xlFlagInlineData,
+	}}
+	vObj.meta, _ = base64.StdEncoding.DecodeString("gqRUeXBlAaVWMk9iat4AEaJJRMQQEkaOteYCSrWB3nqppSIKTqRERGlyxBAO8fXSJ5RI+YEtsp8KneVVpkVjQWxnbwGjRWNNDKNFY04Ep0VjQlNpemXSABAAAKdFY0luZGV4BaZFY0Rpc3TcABAFBgcICQoLDA0ODxABAgMEqENTdW1BbGdvAahQYXJ0TnVtc5EBqVBhcnRFVGFnc8CpUGFydFNpemVzkdEBL6pQYXJ0QVNpemVzkdEBL6RTaXpl0QEvpU1UaW1l0xbgJhIa6ABvp01ldGFTeXOBvHgtbWluaW8taW50ZXJuYWwtaW5saW5lLWRhdGHEBHRydWWnTWV0YVVzcoKsY29udGVudC10eXBluGFwcGxpY2F0aW9uL29jdGV0LXN0cmVhbaRldGFn2SBlYTIxMDE2MmVlYjRhZGMzMWZmOTg0Y2I3NDRkNmFmNg==")
+
+	testCases := []struct {
+		name        string
+		input       [][]xlMetaV2ShallowVersion
+		quorum      int
+		reqVersions int
+		want        []xlMetaV2ShallowVersion
+	}{
+		{
+			name: "obj-on-one",
+			input: [][]xlMetaV2ShallowVersion{
+				0: {vDelMarker, vObj}, // disk 0
+				1: {vDelMarker},       // disk 1
+				2: {vDelMarker},       // disk 2
+			},
+			quorum:      2,
+			reqVersions: 0,
+			want:        []xlMetaV2ShallowVersion{vDelMarker},
+		},
+		{
+			name: "obj-on-two",
+			input: [][]xlMetaV2ShallowVersion{
+				0: {vDelMarker, vObj}, // disk 0
+				1: {vDelMarker, vObj}, // disk 1
+				2: {vDelMarker},       // disk 2
+			},
+			quorum:      2,
+			reqVersions: 0,
+			want:        []xlMetaV2ShallowVersion{vDelMarker, vObj},
+		},
+		{
+			name: "obj-on-all",
+			input: [][]xlMetaV2ShallowVersion{
+				0: {vDelMarker, vObj}, // disk 0
+				1: {vDelMarker, vObj}, // disk 1
+				2: {vDelMarker, vObj}, // disk 2
+			},
+			quorum:      2,
+			reqVersions: 0,
+			want:        []xlMetaV2ShallowVersion{vDelMarker, vObj},
+		},
+		{
+			name: "del-on-one",
+			input: [][]xlMetaV2ShallowVersion{
+				0: {vDelMarker, vObj}, // disk 0
+				1: {vObj},             // disk 1
+				2: {vObj},             // disk 2
+			},
+			quorum:      2,
+			reqVersions: 0,
+			want:        []xlMetaV2ShallowVersion{vObj},
+		},
+		{
+			name: "del-on-two",
+			input: [][]xlMetaV2ShallowVersion{
+				0: {vDelMarker, vObj}, // disk 0
+				1: {vDelMarker, vObj}, // disk 1
+				2: {vObj},             // disk 2
+			},
+			quorum:      2,
+			reqVersions: 0,
+			want:        []xlMetaV2ShallowVersion{vDelMarker, vObj},
+		},
+		{
+			name: "del-on-two-16stripe",
+			input: [][]xlMetaV2ShallowVersion{
+				0:  {vObj},             // disk 0
+				1:  {vDelMarker, vObj}, // disk 1
+				2:  {vDelMarker, vObj}, // disk 2
+				3:  {vDelMarker, vObj}, // disk 3
+				4:  {vDelMarker, vObj}, // disk 4
+				5:  {vDelMarker, vObj}, // disk 5
+				6:  {vDelMarker, vObj}, // disk 6
+				7:  {vDelMarker, vObj}, // disk 7
+				8:  {vDelMarker, vObj}, // disk 8
+				9:  {vDelMarker, vObj}, // disk 9
+				10: {vObj},             // disk 10
+				11: {vDelMarker, vObj}, // disk 11
+				12: {vDelMarker, vObj}, // disk 12
+				13: {vDelMarker, vObj}, // disk 13
+				14: {vDelMarker, vObj}, // disk 14
+				15: {vDelMarker, vObj}, // disk 15
+			},
+			quorum:      7,
+			reqVersions: 0,
+			want:        []xlMetaV2ShallowVersion{vDelMarker, vObj},
+		},
+	}
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			// Run multiple times, shuffling the input order.
+			for i := int64(0); i < 50; i++ {
+				t.Run(fmt.Sprint(i), func(t *testing.T) {
+					rng := rand.New(rand.NewSource(i))
+					rng.Shuffle(len(test.input), func(i, j int) {
+						test.input[i], test.input[j] = test.input[j], test.input[i]
+					})
+					got := mergeXLV2Versions(test.quorum, true, 0, test.input...)
+					if !reflect.DeepEqual(test.want, got) {
+						t.Errorf("want %v != got %v", test.want, got)
+					}
+				})
 			}
 		})
 	}

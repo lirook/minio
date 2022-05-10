@@ -38,7 +38,7 @@ type apiConfig struct {
 	requestsDeadline time.Duration
 	requestsPool     chan struct{}
 	clusterDeadline  time.Duration
-	listQuorum       int
+	listQuorum       string
 	corsAllowOrigins []string
 	// total drives per erasure set across pools.
 	totalDriveCount          int
@@ -50,6 +50,7 @@ type apiConfig struct {
 	staleUploadsCleanupInterval time.Duration
 	deleteCleanupInterval       time.Duration
 	disableODirect              bool
+	gzipObjects                 bool
 }
 
 const cgroupLimitFile = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
@@ -126,7 +127,7 @@ func (t *apiConfig) init(cfg api.Config, setDriveCounts []int) {
 		}
 	}
 
-	if cap(t.requestsPool) < apiRequestsMaxPerNode {
+	if cap(t.requestsPool) != apiRequestsMaxPerNode {
 		// Only replace if needed.
 		// Existing requests will use the previous limit,
 		// but new requests will use the new limit.
@@ -135,7 +136,7 @@ func (t *apiConfig) init(cfg api.Config, setDriveCounts []int) {
 		t.requestsPool = make(chan struct{}, apiRequestsMaxPerNode)
 	}
 	t.requestsDeadline = cfg.RequestsDeadline
-	t.listQuorum = cfg.GetListQuorum()
+	t.listQuorum = cfg.ListQuorum
 	if globalReplicationPool != nil &&
 		cfg.ReplicationWorkers != t.replicationWorkers {
 		globalReplicationPool.ResizeFailedWorkers(cfg.ReplicationFailedWorkers)
@@ -152,6 +153,7 @@ func (t *apiConfig) init(cfg api.Config, setDriveCounts []int) {
 	t.staleUploadsCleanupInterval = cfg.StaleUploadsCleanupInterval
 	t.deleteCleanupInterval = cfg.DeleteCleanupInterval
 	t.disableODirect = cfg.DisableODirect
+	t.gzipObjects = cfg.GzipObjects
 }
 
 func (t *apiConfig) isDisableODirect() bool {
@@ -161,7 +163,14 @@ func (t *apiConfig) isDisableODirect() bool {
 	return t.disableODirect
 }
 
-func (t *apiConfig) getListQuorum() int {
+func (t *apiConfig) shouldGzipObjects() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	return t.gzipObjects
+}
+
+func (t *apiConfig) getListQuorum() string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -237,10 +246,12 @@ func maxClients(f http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		globalHTTPStats.incS3RequestsIncoming()
 
-		if val := globalServiceFreeze.Load(); val != nil {
-			if unlock, ok := val.(chan struct{}); ok && unlock != nil {
-				// Wait until unfrozen.
-				<-unlock
+		if r.Header.Get(globalObjectPerfUserMetadata) == "" {
+			if val := globalServiceFreeze.Load(); val != nil {
+				if unlock, ok := val.(chan struct{}); ok && unlock != nil {
+					// Wait until unfrozen.
+					<-unlock
+				}
 			}
 		}
 

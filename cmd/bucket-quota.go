@@ -20,10 +20,12 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/minio/madmin-go"
+	"github.com/minio/minio/internal/logger"
 )
 
 // BucketQuotaSys - map of bucket and quota configuration.
@@ -40,8 +42,8 @@ func (sys *BucketQuotaSys) Get(ctx context.Context, bucketName string) (*madmin.
 		}
 		return &madmin.BucketQuota{}, nil
 	}
-
-	return globalBucketMetadataSys.GetQuotaConfig(ctx, bucketName)
+	qCfg, _, err := globalBucketMetadataSys.GetQuotaConfig(ctx, bucketName)
+	return qCfg, err
 }
 
 // NewBucketQuotaSys returns initialized BucketQuotaSys
@@ -85,6 +87,10 @@ func parseBucketQuota(bucket string, data []byte) (quotaCfg *madmin.BucketQuota,
 		return quotaCfg, err
 	}
 	if !quotaCfg.IsValid() {
+		if quotaCfg.Type == "fifo" {
+			logger.LogIf(GlobalContext, errors.New("Detected older 'fifo' quota config, 'fifo' feature is removed and not supported anymore. Please clear your quota configs using 'mc admin bucket quota alias/bucket --clear' and use 'mc ilm add' for expiration of objects"))
+			return quotaCfg, nil
+		}
 		return quotaCfg, fmt.Errorf("Invalid quota config %#v", quotaCfg)
 	}
 	return

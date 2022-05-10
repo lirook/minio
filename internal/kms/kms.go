@@ -18,6 +18,7 @@
 package kms
 
 import (
+	"context"
 	"encoding"
 	"encoding/json"
 
@@ -51,6 +52,11 @@ type KMS interface {
 	// by the key ID. The context must match the context value
 	// used to generate the ciphertext.
 	DecryptKey(keyID string, ciphertext []byte, context Context) ([]byte, error)
+
+	// DecryptAll decrypts all ciphertexts with the key referenced
+	// by the key ID. The contexts must match the context value
+	// used to generate the ciphertexts.
+	DecryptAll(ctx context.Context, keyID string, ciphertext [][]byte, context []Context) ([][]byte, error)
 }
 
 // Status describes the current state of a KMS.

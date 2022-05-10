@@ -903,43 +903,54 @@ func (client *peerRESTClient) Trace(traceCh chan interface{}, doneCh <-chan stru
 	}()
 }
 
+func (client *peerRESTClient) doConsoleLog(logCh chan interface{}, doneCh <-chan struct{}) {
+	// To cancel the REST request in case doneCh gets closed.
+	ctx, cancel := context.WithCancel(GlobalContext)
+
+	cancelCh := make(chan struct{})
+	defer close(cancelCh)
+	go func() {
+		select {
+		case <-doneCh:
+		case <-cancelCh:
+			// There was an error in the REST request.
+		}
+		cancel()
+	}()
+
+	respBody, err := client.callWithContext(ctx, peerRESTMethodLog, nil, nil, -1)
+	defer http.DrainBody(respBody)
+	if err != nil {
+		return
+	}
+
+	dec := gob.NewDecoder(respBody)
+	for {
+		var lg madmin.LogInfo
+		if err = dec.Decode(&lg); err != nil {
+			break
+		}
+		if lg.DeploymentID != "" {
+			select {
+			case logCh <- lg:
+			default:
+				// Do not block on slow receivers.
+			}
+		}
+	}
+}
+
 // ConsoleLog - sends request to peer nodes to get console logs
 func (client *peerRESTClient) ConsoleLog(logCh chan interface{}, doneCh <-chan struct{}) {
 	go func() {
 		for {
-			// get cancellation context to properly unsubscribe peers
-			ctx, cancel := context.WithCancel(GlobalContext)
-			respBody, err := client.callWithContext(ctx, peerRESTMethodLog, nil, nil, -1)
-			if err != nil {
-				// Retry the failed request.
-				time.Sleep(5 * time.Second)
-			} else {
-				dec := gob.NewDecoder(respBody)
-
-				go func() {
-					<-doneCh
-					cancel()
-				}()
-
-				for {
-					var log madmin.LogInfo
-					if err = dec.Decode(&log); err != nil {
-						break
-					}
-					select {
-					case logCh <- log:
-					default:
-					}
-				}
-			}
-
+			client.doConsoleLog(logCh, doneCh)
 			select {
 			case <-doneCh:
-				cancel()
-				http.DrainBody(respBody)
 				return
 			default:
-				// There was error in the REST request, retry.
+				// There was error in the REST request, retry after sometime as probably the peer is down.
+				time.Sleep(5 * time.Second)
 			}
 		}
 	}()
@@ -1039,7 +1050,8 @@ func (client *peerRESTClient) GetPeerMetrics(ctx context.Context) (<-chan Metric
 }
 
 func (client *peerRESTClient) Speedtest(ctx context.Context, size,
-	concurrent int, duration time.Duration, storageClass string) (SpeedtestResult, error) {
+	concurrent int, duration time.Duration, storageClass string,
+) (SpeedtestResult, error) {
 	values := make(url.Values)
 	values.Set(peerRESTSize, strconv.Itoa(size))
 	values.Set(peerRESTConcurrent, strconv.Itoa(concurrent))
@@ -1105,7 +1117,7 @@ func (client *peerRESTClient) ReloadSiteReplicationConfig(ctx context.Context) e
 	return nil
 }
 
-func (client *peerRESTClient) GetLastDayTierStats(ctx context.Context) (dailyAllTierStats, error) {
+func (client *peerRESTClient) GetLastDayTierStats(ctx context.Context) (DailyAllTierStats, error) {
 	var result map[string]lastDayTierStats
 	respBody, err := client.callWithContext(context.Background(), peerRESTMethodGetLastDayTierStats, nil, nil, -1)
 	if err != nil {
@@ -1115,7 +1127,31 @@ func (client *peerRESTClient) GetLastDayTierStats(ctx context.Context) (dailyAll
 
 	err = gob.NewDecoder(respBody).Decode(&result)
 	if err != nil {
-		return dailyAllTierStats{}, err
+		return DailyAllTierStats{}, err
 	}
-	return dailyAllTierStats(result), nil
+	return DailyAllTierStats(result), nil
+}
+
+// DevNull - Used by netperf to pump data to peer
+func (client *peerRESTClient) DevNull(ctx context.Context, r io.Reader) error {
+	respBody, err := client.callWithContext(ctx, peerRESTMethodDevNull, nil, r, -1)
+	if err != nil {
+		return err
+	}
+	defer http.DrainBody(respBody)
+	return err
+}
+
+// Netperf - To initiate netperf on peer
+func (client *peerRESTClient) Netperf(ctx context.Context, duration time.Duration) (madmin.NetperfNodeResult, error) {
+	var result madmin.NetperfNodeResult
+	values := make(url.Values)
+	values.Set(peerRESTDuration, duration.String())
+	respBody, err := client.callWithContext(context.Background(), peerRESTMethodNetperf, values, nil, -1)
+	if err != nil {
+		return result, err
+	}
+	defer http.DrainBody(respBody)
+	err = gob.NewDecoder(respBody).Decode(&result)
+	return result, err
 }

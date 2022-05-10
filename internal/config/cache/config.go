@@ -115,7 +115,6 @@ func parseCacheDrives(drives string) ([]string, error) {
 			endpoints = append(endpoints, d)
 		}
 	}
-
 	for _, d := range endpoints {
 		if !filepath.IsAbs(d) {
 			return nil, config.ErrInvalidCacheDrivesValue(nil).Msg("cache dir should be absolute path: %s", d)

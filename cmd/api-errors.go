@@ -212,6 +212,7 @@ const (
 	ErrInvalidSSECustomerParameters
 	ErrIncompatibleEncryptionMethod
 	ErrKMSNotConfigured
+	ErrKMSKeyNotFoundException
 
 	ErrNoAccessKey
 	ErrInvalidToken
@@ -279,6 +280,7 @@ const (
 	ErrSiteReplicationBucketConfigError
 	ErrSiteReplicationBucketMetaError
 	ErrSiteReplicationIAMError
+	ErrSiteReplicationConfigMissing
 
 	// Bucket Quota error codes
 	ErrAdminBucketQuotaExceeded
@@ -382,6 +384,7 @@ const (
 	ErrAdminProfilerNotEnabled
 	ErrInvalidDecompressedSize
 	ErrAddUserInvalidArgument
+	ErrAdminResourceInvalidArgument
 	ErrAdminAccountNotEligible
 	ErrAccountNotEligible
 	ErrAdminServiceAccountNotFound
@@ -1127,6 +1130,11 @@ var errorCodes = errorCodeMap{
 		Description:    "Server side encryption specified but KMS is not configured",
 		HTTPStatusCode: http.StatusNotImplemented,
 	},
+	ErrKMSKeyNotFoundException: {
+		Code:           "KMS.NotFoundException",
+		Description:    "Invalid keyId",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrNoAccessKey: {
 		Code:           "AccessDenied",
 		Description:    "No AWSAccessKey was presented",
@@ -1333,7 +1341,11 @@ var errorCodes = errorCodeMap{
 		Description:    "Error while replicating an IAM item",
 		HTTPStatusCode: http.StatusServiceUnavailable,
 	},
-
+	ErrSiteReplicationConfigMissing: {
+		Code:           "XMinioSiteReplicationConfigMissingError",
+		Description:    "Site not found in site replication configuration",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrMaximumExpires: {
 		Code:           "AuthorizationQueryParametersError",
 		Description:    "X-Amz-Expires must be less than a week (in seconds); that is, the given X-Amz-Expires must be less than 604800 seconds",
@@ -1819,6 +1831,11 @@ var errorCodes = errorCodeMap{
 		Description:    "User is not allowed to be same as admin access key",
 		HTTPStatusCode: http.StatusForbidden,
 	},
+	ErrAdminResourceInvalidArgument: {
+		Code:           "XMinioInvalidResource",
+		Description:    "Policy, user or group names are not allowed to begin or end with space characters",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrAdminAccountNotEligible: {
 		Code:           "XMinioInvalidIAMCredentials",
 		Description:    "The administrator key is not eligible for this operation",
@@ -1912,6 +1929,9 @@ func toAPIErrorCode(ctx context.Context, err error) (apiErr APIErrorCode) {
 		apiErr = ErrIncompatibleEncryptionMethod
 	case errKMSNotConfigured:
 		apiErr = ErrKMSNotConfigured
+	case errKMSKeyNotFound:
+		apiErr = ErrKMSKeyNotFoundException
+
 	case context.Canceled, context.DeadlineExceeded:
 		apiErr = ErrOperationTimedOut
 	case errDiskNotFound:

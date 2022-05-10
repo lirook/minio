@@ -157,16 +157,16 @@ func getOpts(ctx context.Context, r *http.Request, bucket, object string) (Objec
 			}
 		}
 	}
+	opts.VersionSuspended = globalBucketVersioningSys.PrefixSuspended(bucket, object)
 	return opts, nil
 }
 
 func delOpts(ctx context.Context, r *http.Request, bucket, object string) (opts ObjectOptions, err error) {
-	versioned := globalBucketVersioningSys.Enabled(bucket)
 	opts, err = getOpts(ctx, r, bucket, object)
 	if err != nil {
 		return opts, err
 	}
-	opts.Versioned = versioned
+	opts.Versioned = globalBucketVersioningSys.PrefixEnabled(bucket, object)
 	opts.VersionSuspended = globalBucketVersioningSys.Suspended(bucket)
 	delMarker := strings.TrimSpace(r.Header.Get(xhttp.MinIOSourceDeleteMarker))
 	if delMarker != "" {
@@ -203,8 +203,9 @@ func delOpts(ctx context.Context, r *http.Request, bucket, object string) (opts 
 
 // get ObjectOptions for PUT calls from encryption headers and metadata
 func putOpts(ctx context.Context, r *http.Request, bucket, object string, metadata map[string]string) (opts ObjectOptions, err error) {
-	versioned := globalBucketVersioningSys.Enabled(bucket)
-	versionSuspended := globalBucketVersioningSys.Suspended(bucket)
+	versioned := globalBucketVersioningSys.PrefixEnabled(bucket, object)
+	versionSuspended := globalBucketVersioningSys.PrefixSuspended(bucket, object)
+
 	vid := strings.TrimSpace(r.Form.Get(xhttp.VersionID))
 	if vid != "" && vid != nullVersionID {
 		_, err := uuid.Parse(vid)

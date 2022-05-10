@@ -18,6 +18,7 @@
 package kms
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -222,6 +223,18 @@ func (kms secretKey) DecryptKey(keyID string, ciphertext []byte, context Context
 		return nil, fmt.Errorf("kms: encrypted key is not authentic")
 	}
 	return plaintext, nil
+}
+
+func (kms secretKey) DecryptAll(_ context.Context, keyID string, ciphertexts [][]byte, contexts []Context) ([][]byte, error) {
+	plaintexts := make([][]byte, 0, len(ciphertexts))
+	for i := range ciphertexts {
+		plaintext, err := kms.DecryptKey(keyID, ciphertexts[i], contexts[i])
+		if err != nil {
+			return nil, err
+		}
+		plaintexts = append(plaintexts, plaintext)
+	}
+	return plaintexts, nil
 }
 
 type encryptedKey struct {

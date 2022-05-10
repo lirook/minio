@@ -19,16 +19,12 @@ package cmd
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/minio/dperf/pkg/dperf"
 	"github.com/minio/madmin-go"
 )
-
-var dperfUUID = mustGetUUID()
 
 type speedTestOpts struct {
 	throughputSize   int
@@ -160,40 +156,29 @@ func objectSpeedTest(ctx context.Context, opts speedTestOpts) chan madmin.SpeedT
 	return ch
 }
 
-// speedTest - Deprecated. See objectSpeedTest
-func speedTest(ctx context.Context, opts speedTestOpts) chan madmin.SpeedTestResult {
-	return objectSpeedTest(ctx, opts)
-}
-
 func driveSpeedTest(ctx context.Context, opts madmin.DriveSpeedTestOpts) madmin.DriveSpeedTestResult {
 	perf := &dperf.DrivePerf{
 		Serial:    opts.Serial,
 		BlockSize: opts.BlockSize,
 		FileSize:  opts.FileSize,
 	}
-	paths := func() []string {
-		toRet := []string{}
-		paths := globalEndpoints.LocalDisksPaths()
-		for _, p := range paths {
-			dperfFilename := filepath.Join(p, ".minio.sys", "tmp", dperfUUID)
-			if _, err := os.Stat(dperfFilename); err == nil {
-				// file exists, so remove it
-				os.Remove(dperfFilename)
-			}
-			toRet = append(toRet, dperfFilename)
+
+	localPaths := globalEndpoints.LocalDisksPaths()
+	paths := func() (tmpPaths []string) {
+		for _, lp := range localPaths {
+			tmpPaths = append(tmpPaths, pathJoin(lp, minioMetaTmpBucket))
 		}
-		return toRet
+		return tmpPaths
 	}()
 
 	perfs, err := perf.Run(ctx, paths...)
 	return madmin.DriveSpeedTestResult{
 		Endpoint: globalLocalNodeName,
 		Version:  Version,
-		DrivePerf: func() []madmin.DrivePerf {
-			results := []madmin.DrivePerf{}
-			for _, r := range perfs {
+		DrivePerf: func() (results []madmin.DrivePerf) {
+			for idx, r := range perfs {
 				result := madmin.DrivePerf{
-					Path:            r.Path,
+					Path:            localPaths[idx],
 					ReadThroughput:  r.ReadThroughput,
 					WriteThroughput: r.WriteThroughput,
 					Error: func() string {

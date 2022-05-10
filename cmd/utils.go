@@ -44,6 +44,7 @@ import (
 
 	"github.com/coreos/go-oidc"
 	"github.com/dustin/go-humanize"
+	"github.com/felixge/fgprof"
 	"github.com/gorilla/mux"
 	"github.com/minio/madmin-go"
 	miniogopolicy "github.com/minio/minio-go/v7/pkg/policy"
@@ -87,6 +88,14 @@ func IsErr(err error, errs ...error) bool {
 	return false
 }
 
+// returns 'true' if either string has space in the
+// - beginning of a string
+// OR
+// - end of a string
+func hasSpaceBE(s string) bool {
+	return strings.TrimSpace(s) != s
+}
+
 func request2BucketObjectName(r *http.Request) (bucketName, objectName string) {
 	path, err := getResource(r.URL.Path, r.Host, globalDomainNames)
 	if err != nil {
@@ -120,6 +129,9 @@ func getWriteQuorum(drive int) int {
 	}
 	return quorum
 }
+
+// CloneMSS is an exposed function of cloneMSS for gateway usage.
+var CloneMSS = cloneMSS
 
 // cloneMSS will clone a map[string]string.
 // If input is nil an empty map is returned, not nil.
@@ -313,6 +325,36 @@ func startProfiler(profilerType string) (minioProfiler, error) {
 		prof.stopFn = func() ([]byte, error) {
 			pprof.StopCPUProfile()
 			err := f.Close()
+			if err != nil {
+				return nil, err
+			}
+			defer os.RemoveAll(dirPath)
+			return ioutil.ReadFile(fn)
+		}
+	case madmin.ProfilerCPUIO:
+		// at 10k or more goroutines fgprof is likely to become
+		// unable to maintain its sampling rate and to significantly
+		// degrade the performance of your application
+		// https://github.com/felixge/fgprof#fgprof
+		if n := runtime.NumGoroutine(); n > 10000 && !globalIsCICD {
+			return nil, fmt.Errorf("unable to perform CPU IO profile with %d goroutines", n)
+		}
+		dirPath, err := ioutil.TempDir("", "profile")
+		if err != nil {
+			return nil, err
+		}
+		fn := filepath.Join(dirPath, "cpuio.out")
+		f, err := os.Create(fn)
+		if err != nil {
+			return nil, err
+		}
+		stop := fgprof.Start(f, fgprof.FormatPprof)
+		prof.stopFn = func() ([]byte, error) {
+			err := stop()
+			if err != nil {
+				return nil, err
+			}
+			err = f.Close()
 			if err != nil {
 				return nil, err
 			}
@@ -597,6 +639,7 @@ func NewGatewayHTTPTransportWithClientCerts(clientCert, clientKey string) *http.
 				err.Error()))
 		}
 		if c != nil {
+			c.UpdateReloadDuration(10 * time.Second)
 			c.ReloadOnSignal(syscall.SIGHUP) // allow reloads upon SIGHUP
 			transport.TLSClientConfig.GetClientCertificate = c.GetClientCertificate
 		}
@@ -662,7 +705,8 @@ func jsonLoad(r io.ReadSeeker, data interface{}) error {
 func jsonSave(f interface {
 	io.WriteSeeker
 	Truncate(int64) error
-}, data interface{}) error {
+}, data interface{},
+) error {
 	b, err := json.Marshal(data)
 	if err != nil {
 		return err
@@ -867,7 +911,7 @@ func getMinioMode() string {
 }
 
 func iamPolicyClaimNameOpenID() string {
-	return globalOpenIDConfig.ClaimPrefix + globalOpenIDConfig.ClaimName
+	return globalOpenIDConfig.GetIAMPolicyClaimName()
 }
 
 func iamPolicyClaimNameSA() string {
@@ -978,12 +1022,14 @@ type AuditLogOptions struct {
 	APIName   string
 	Status    string
 	VersionID string
+	Error     string
 }
 
 // sends audit logs for internal subsystem activity
 func auditLogInternal(ctx context.Context, bucket, object string, opts AuditLogOptions) {
 	entry := audit.NewEntry(globalDeploymentID)
 	entry.Trigger = opts.Trigger
+	entry.Error = opts.Error
 	entry.API.Name = opts.APIName
 	entry.API.Bucket = bucket
 	entry.API.Object = object
@@ -992,6 +1038,11 @@ func auditLogInternal(ctx context.Context, bucket, object string, opts AuditLogO
 		entry.ReqQuery[xhttp.VersionID] = opts.VersionID
 	}
 	entry.API.Status = opts.Status
+	// Merge tag information if found - this is currently needed for tags
+	// set during decommissioning.
+	if reqInfo := logger.GetReqInfo(ctx); reqInfo != nil {
+		entry.Tags = reqInfo.GetTagsMap()
+	}
 	ctx = logger.SetAuditEntry(ctx, &entry)
 	logger.AuditLog(ctx, nil, nil, nil)
 }

@@ -19,7 +19,6 @@ package cmd
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -98,12 +97,7 @@ func formatErasureCleanupTmp(diskPath string) {
 			err))
 	}
 
-	if err := renameAll(tmpOld, pathJoin(diskPath, minioMetaTmpDeletedBucket, tmpID)); err != nil && !errors.Is(err, errFileNotFound) {
-		logger.LogIf(GlobalContext, fmt.Errorf("unable to rename (%s -> %s) %w, drive may be faulty please investigate",
-			pathJoin(diskPath, minioMetaTmpBucket),
-			tmpOld,
-			osErrToFileErr(err)))
-	}
+	go removeAll(tmpOld)
 
 	// Renames and schedules for purging all bucket metacache.
 	renameAllBucketMetacache(diskPath)
@@ -126,31 +120,9 @@ func isServerResolvable(endpoint Endpoint, timeout time.Duration) error {
 		Path:   pathJoin(healthCheckPathPrefix, healthCheckLivenessPath),
 	}
 
-	var tlsConfig *tls.Config
-	if globalIsTLS {
-		tlsConfig = &tls.Config{
-			RootCAs: globalRootCAs,
-		}
-	}
-
 	httpClient := &http.Client{
-		Transport:
-		// For more details about various values used here refer
-		// https://golang.org/pkg/net/http/#Transport documentation
-		&http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           xhttp.NewCustomDialContext(3 * time.Second),
-			ResponseHeaderTimeout: 3 * time.Second,
-			TLSHandshakeTimeout:   3 * time.Second,
-			ExpectContinueTimeout: 3 * time.Second,
-			TLSClientConfig:       tlsConfig,
-			// Go net/http automatically unzip if content-type is
-			// gzip disable this feature, as we are always interested
-			// in raw stream.
-			DisableCompression: true,
-		},
+		Transport: globalInternodeTransport,
 	}
-	defer httpClient.CloseIdleConnections()
 
 	ctx, cancel := context.WithTimeout(GlobalContext, timeout)
 
@@ -173,7 +145,7 @@ func isServerResolvable(endpoint Endpoint, timeout time.Duration) error {
 // connect to list of endpoints and load all Erasure disk formats, validate the formats are correct
 // and are in quorum, if no formats are found attempt to initialize all of them for the first
 // time. additionally make sure to close all the disks used in this attempt.
-func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID, distributionAlgo string) (storageDisks []StorageAPI, format *formatErasureV3, err error) {
+func connectLoadInitFormats(verboseLogging bool, firstDisk bool, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID, distributionAlgo string) (storageDisks []StorageAPI, format *formatErasureV3, err error) {
 	// Initialize all storage disks
 	storageDisks, errs := initStorageDisksWithErrors(endpoints)
 
@@ -185,7 +157,7 @@ func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints,
 
 	for i, err := range errs {
 		if err != nil {
-			if err == errDiskNotFound && retryCount >= 10 {
+			if err == errDiskNotFound && verboseLogging {
 				logger.Error("Unable to connect to %s: %v", endpoints[i], isServerResolvable(endpoints[i], time.Second))
 			} else {
 				logger.Error("Unable to use the drive %s: %v", endpoints[i], err)
@@ -202,7 +174,7 @@ func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints,
 	// Check if we have
 	for i, sErr := range sErrs {
 		// print the error, nonetheless, which is perhaps unhandled
-		if sErr != errUnformattedDisk && sErr != errDiskNotFound && retryCount >= 10 {
+		if sErr != errUnformattedDisk && sErr != errDiskNotFound && verboseLogging {
 			if sErr != nil {
 				logger.Error("Unable to read 'format.json' from %s: %v\n", endpoints[i], sErr)
 			}
@@ -307,7 +279,8 @@ func waitForFormatErasure(firstDisk bool, endpoints Endpoints, poolCount, setCou
 	}
 
 	var tries int
-	storageDisks, format, err := connectLoadInitFormats(tries, firstDisk, endpoints, poolCount, setCount, setDriveCount, deploymentID, distributionAlgo)
+	var verboseLogging bool
+	storageDisks, format, err := connectLoadInitFormats(verboseLogging, firstDisk, endpoints, poolCount, setCount, setDriveCount, deploymentID, distributionAlgo)
 	if err == nil {
 		return storageDisks, format, nil
 	}
@@ -321,12 +294,13 @@ func waitForFormatErasure(firstDisk bool, endpoints Endpoints, poolCount, setCou
 	for {
 		select {
 		case <-ticker.C:
-			if tries == 10 {
-				// Reset the tries count such that we log only for every 10 retries.
+			// Only log once every 10 iterations, then reset the tries count.
+			verboseLogging = tries >= 10
+			if verboseLogging {
 				tries = 1
 			}
 
-			storageDisks, format, err := connectLoadInitFormats(tries, firstDisk, endpoints, poolCount, setCount, setDriveCount, deploymentID, distributionAlgo)
+			storageDisks, format, err := connectLoadInitFormats(verboseLogging, firstDisk, endpoints, poolCount, setCount, setDriveCount, deploymentID, distributionAlgo)
 			if err != nil {
 				tries++
 				switch err {

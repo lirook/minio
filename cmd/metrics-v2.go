@@ -48,6 +48,7 @@ func init() {
 		getMinioHealingMetrics(),
 		getNodeHealthMetrics(),
 		getClusterStorageMetrics(),
+		getClusterTierMetrics(),
 	}
 
 	peerMetricsGroups = []*MetricsGroup{
@@ -61,6 +62,7 @@ func init() {
 		getS3TTFBMetric(),
 		getILMNodeMetrics(),
 		getScannerNodeMetrics(),
+		getIAMNodeMetrics(),
 	}
 
 	allMetricsGroups := func() (allMetrics []*MetricsGroup) {
@@ -120,6 +122,7 @@ const (
 	quotaSubsystem            MetricSubsystem = "quota"
 	ilmSubsystem              MetricSubsystem = "ilm"
 	scannerSubsystem          MetricSubsystem = "scanner"
+	iamSubsystem              MetricSubsystem = "iam"
 )
 
 // MetricName are the individual names for the metric.
@@ -181,6 +184,10 @@ const (
 	expiryPendingTasks     MetricName = "expiry_pending_tasks"
 	transitionPendingTasks MetricName = "transition_pending_tasks"
 	transitionActiveTasks  MetricName = "transition_active_tasks"
+
+	transitionedBytes    MetricName = "transitioned_bytes"
+	transitionedObjects  MetricName = "transitioned_objects"
+	transitionedVersions MetricName = "transitioned_versions"
 )
 
 const (
@@ -1261,6 +1268,62 @@ func getScannerNodeMetrics() *MetricsGroup {
 	return mg
 }
 
+func getIAMNodeMetrics() *MetricsGroup {
+	mg := &MetricsGroup{}
+	mg.RegisterRead(func(_ context.Context) (metrics []Metric) {
+		lastSyncTime := atomic.LoadUint64(&globalIAMSys.LastRefreshTimeUnixNano)
+		var sinceLastSyncMillis uint64
+		if lastSyncTime != 0 {
+			sinceLastSyncMillis = (uint64(time.Now().UnixNano()) - lastSyncTime) / uint64(time.Millisecond)
+		}
+
+		metrics = []Metric{
+			{
+				Description: MetricDescription{
+					Namespace: nodeMetricNamespace,
+					Subsystem: iamSubsystem,
+					Name:      "last_sync_duration_millis",
+					Help:      "Last successful IAM data sync duration in milliseconds",
+					Type:      gaugeMetric,
+				},
+				Value: float64(atomic.LoadUint64(&globalIAMSys.LastRefreshDurationMilliseconds)),
+			},
+			{
+				Description: MetricDescription{
+					Namespace: nodeMetricNamespace,
+					Subsystem: iamSubsystem,
+					Name:      "since_last_sync_millis",
+					Help:      "Time (in milliseconds) since last successful IAM data sync. This is set to 0 until the first sync after server start.",
+					Type:      gaugeMetric,
+				},
+				Value: float64(sinceLastSyncMillis),
+			},
+			{
+				Description: MetricDescription{
+					Namespace: nodeMetricNamespace,
+					Subsystem: iamSubsystem,
+					Name:      "sync_successes",
+					Help:      "Number of successful IAM data syncs since server start.",
+					Type:      counterMetric,
+				},
+				Value: float64(atomic.LoadUint64(&globalIAMSys.TotalRefreshSuccesses)),
+			},
+			{
+				Description: MetricDescription{
+					Namespace: nodeMetricNamespace,
+					Subsystem: iamSubsystem,
+					Name:      "sync_failures",
+					Help:      "Number of failed IAM data syncs since server start.",
+					Type:      counterMetric,
+				},
+				Value: float64(atomic.LoadUint64(&globalIAMSys.TotalRefreshFailures)),
+			},
+		}
+		return metrics
+	})
+	return mg
+}
+
 func getMinioVersionMetrics() *MetricsGroup {
 	mg := &MetricsGroup{}
 	mg.RegisterRead(func(_ context.Context) (metrics []Metric) {
@@ -1605,9 +1668,65 @@ func getBucketUsageMetrics() *MetricsGroup {
 				HistogramBucketLabel: "range",
 				VariableLabels:       map[string]string{"bucket": bucket},
 			})
-
 		}
 		return
+	})
+	return mg
+}
+
+func getClusterTransitionedBytesMD() MetricDescription {
+	return MetricDescription{
+		Namespace: clusterMetricNamespace,
+		Subsystem: ilmSubsystem,
+		Name:      transitionedBytes,
+		Help:      "Total bytes transitioned to a tier",
+		Type:      gaugeMetric,
+	}
+}
+
+func getClusterTransitionedObjectsMD() MetricDescription {
+	return MetricDescription{
+		Namespace: clusterMetricNamespace,
+		Subsystem: ilmSubsystem,
+		Name:      transitionedObjects,
+		Help:      "Total number of objects transitioned to a tier",
+		Type:      gaugeMetric,
+	}
+}
+
+func getClusterTransitionedVersionsMD() MetricDescription {
+	return MetricDescription{
+		Namespace: clusterMetricNamespace,
+		Subsystem: ilmSubsystem,
+		Name:      transitionedVersions,
+		Help:      "Total number of versions transitioned to a tier",
+		Type:      gaugeMetric,
+	}
+}
+
+func getClusterTierMetrics() *MetricsGroup {
+	mg := &MetricsGroup{
+		cacheInterval: 10 * time.Second,
+	}
+	mg.RegisterRead(func(ctx context.Context) (metrics []Metric) {
+		objLayer := newObjectLayerFn()
+		if objLayer == nil || globalIsGateway {
+			return
+		}
+		if globalTierConfigMgr.Empty() {
+			return
+		}
+
+		dui, err := loadDataUsageFromBackend(GlobalContext, objLayer)
+		if err != nil {
+			return
+		}
+		// data usage has not captured any tier stats yet.
+		if dui.TierStats == nil {
+			return
+		}
+
+		return dui.tierMetrics()
 	})
 	return mg
 }
